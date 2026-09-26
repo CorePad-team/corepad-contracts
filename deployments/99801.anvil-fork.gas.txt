@@ -1,0 +1,9 @@
+launch (+creator buy 0.001)        gas  2449895  tx 0x25d75c3ef1cc2e6aff58d47c0c47c96f7279882bc62c6b469c5831bc81ce3e83
+buy 0.002 (guard window)           gas   113616  tx 0x3f36b7cdbe72c47b263ff23e2f2f0caf62be1e5b0a7929464b872ab8409527ce
+buy 0.3                            gas    74167  tx 0xdefc58f47f2e042d69ab22716e2e11f449458b2bcc3e2ce958a556af91a10856
+approve pool                       gas    46112  tx 0xa8988d01d3056653bfd0839953d29f0bc259993d797f98713230dc5f131bb336
+sell 1e24 tokens                   gas    85845  tx 0x4dc19e4faac2226dc87c48b12368cd9dd7f6168c4f47896653fe92c923b4c3be
+buy 3 (clipped, refunded)          gas    84776  tx 0x42ec3852435286a09b7612b5a113873be19fd90f9fc4eb1acc5d39cddfb1c709
+graduate                           gas   354618  tx 0x5860f9d4b45ea911705789b96932dd5e26cfe1479adeacc9c1faf6cca9ade54b
+dispatch                           gas   324443  tx 0x7a68e844647f7cdab4b77579ec19b279303af9b169b725a375047f8dc81b6a54
+confirm                            gas    56315  tx 0x6792fd71e4a652240543ce49b8d040fcf01442ee576f84f253d743a7bc291903

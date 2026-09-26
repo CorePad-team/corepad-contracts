@@ -1,0 +1,20 @@
+{
+  "CorePadFactory": "0xDF679722EbD07Ac96d3Fa4D4B77879777Bc8bDC4",
+  "ElysiumBridgeAdapter": "0xF2e6A4393c271fd714F32E0c0D12ac68eD39c523",
+  "Settlement": "0x591aA5A01934276e1431E1d115dcd564a2fB8F7F",
+  "bridgeFactory": "0xb94A38a4aC46970559E89E566f2486a3Fc56BE5a",
+  "chainId": 99801,
+  "coreSettler": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f",
+  "deployedAtBlock": 349393,
+  "deployer": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f",
+  "gateway": "0x7255150a0340852Fe4B4B5657C5AcE6c09a4F959",
+  "graduationHype": "1500000000000000000",
+  "guardMaxPerAddress": "10000000000000000000000000",
+  "guardSeconds": 60,
+  "keeper": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f",
+  "mode": "anvil-fork",
+  "rescueDelay": 604800,
+  "router": "0x89659883a9d980925733B0A698F117AAb65ac718",
+  "tickerReserve": "500000000000000000",
+  "treasury": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f"
+}

@@ -19,6 +19,13 @@ contract MockArbSys {
         emit L2ToL1Tx(msg.sender, destination, id, msg.value);
     }
 
+    /// @dev Used by the Arbitrum token gateway when it queues the L2 -> L1 message.
+    function sendTxToL1(address destination, bytes calldata data) external payable returns (uint256 id) {
+        id = nextId++;
+        emit L2ToL1Tx(msg.sender, destination, id, msg.value);
+        data;
+    }
+
     function arbOSVersion() external pure returns (uint256) {
         return 106;
     }
