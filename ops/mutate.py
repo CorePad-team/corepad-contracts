@@ -5,7 +5,7 @@ start on a dirty src/ and verifies src/ is clean again at the end.
 
 A cached invariant failure replays on healthy code, so cache/invariant/failures is wiped after every
 mutant and once more at the end."""
-import pathlib, shutil, subprocess, sys
+import pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MUTANTS = [
@@ -22,7 +22,7 @@ MUTANTS = [
     ("guard-per-call", "src/LaunchPool.sol", "guardBought[msg.sender] = used;", "guardBought[msg.sender] = tokensOut;"),
     ("guard-disabled", "src/LaunchPool.sol", "if (block.timestamp < launchedAt + guardSeconds) {", "if (block.timestamp < launchedAt) {"),
     ("buy-rounds-up", "src/LaunchPool.sol", "tokensOut = y * net / (x + net); // rounds down", "tokensOut = (y * net + x + net - 1) / (x + net); // rounds up"),
-    ("sell-rounds-up", "src/LaunchPool.sol", "uint256 gross = x * tokensIn / (y + tokensIn); // rounds down", "uint256 gross = (x * tokensIn + y + tokensIn - 1) / (y + tokensIn);"),
+    ("sell-rounds-up", "src/LaunchPool.sol", "uint256 gross = x * tokensIn / (y + tokensIn); // rounds down", "uint256 gross = x * tokensIn / (y + tokensIn) + 1;"),
     ("rescue-no-delay", "src/Settlement.sol", "if (block.timestamp < at) revert TooEarly(at);", ""),
     ("rescue-no-eth", "src/Settlement.sol", "treasury.forceSafeTransferETH(hype);\n        emit Rescued", "emit Rescued"),
     ("dispatch-keeps-lock", "src/Settlement.sol", "        lockedHype -= hype;\n\n        IBridgeAdapter a", "\n        IBridgeAdapter a"),
@@ -63,8 +63,7 @@ def main():
             else:
                 verdict = "KILLED" if code_all != 0 else "SURVIVED"
             by_inv = "yes" if code_inv != 0 else "no"
-            failing = sorted({l.split("]")[1].split("(")[0].strip() for l in out_all.splitlines()
-                              if l.startswith("[FAIL") and "]" in l})
+            failing = sorted(set(re.findall(r"\[FAIL[^\n]*?\]\s*((?:test|invariant)\w+)\(", out_all)))
             results.append((name, verdict, by_inv, failing[:4]))
             print(f"{name:28s} {verdict:9s} invariants={by_inv:3s} {', '.join(failing[:4])}", flush=True)
         finally:
@@ -74,7 +73,7 @@ def main():
     if out.strip():
         sys.exit("src/ NOT restored: " + out)
     killed = sum(1 for r in results if r[1] == "KILLED")
-    inv = sum(1 for r in results if r[2] == "yes")
+    inv = sum(1 for r in results if r[1] == "KILLED" and r[2] == "yes")
     print(f"\n{killed}/{len(results)} mutants killed ({inv} by the invariant suite alone); src/ restored and clean")
 
 

@@ -32,6 +32,7 @@ contract Handler is Test {
     uint256 public frozenAttempts;
     uint256 public rescues;
     bool public earlyRescue;
+    bool public earlyGraduation;
     mapping(address => uint256) public ghostGuardBought;
 
     constructor(
@@ -66,7 +67,9 @@ contract Handler is Test {
 
     function buy(uint256 seed, uint256 value) external {
         address a = _actor(seed);
-        value = bound(value, 1, 0.8 ether);
+        // During the guard window, trade in guard-sized clips (1 % of supply ~ 0.0048 HYPE on the
+        // testnet curve) so cumulative buys actually straddle the cap.
+        value = pool.guardActive() ? bound(value, 1, 0.003 ether) : bound(value, 1, 0.8 ether);
         bool wasFrozen = pool.frozen() || pool.graduated();
         uint256 x0 = pool.virtualHype();
         uint256 y0 = pool.virtualToken();
@@ -148,6 +151,13 @@ contract Handler is Test {
         if (fee != spent / 100) feeMismatch = true;
         if (pool.virtualHype() * y0 <= x0 * pool.virtualToken()) priceNotUpOnBuy = true;
         _checkK();
+    }
+
+    function graduateEarly() external {
+        if (pool.frozen() || pool.graduated()) return;
+        try pool.graduate() {
+            earlyGraduation = true;
+        } catch {}
     }
 
     function graduate() external {

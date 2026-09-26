@@ -72,6 +72,7 @@ contract InvariantsTest is Base {
 
     function invariant_graduationRaisesTarget() public view {
         assertFalse(handler.graduationOutOfRange());
+        assertFalse(handler.earlyGraduation());
     }
 
     function invariant_settlementHoldsLockedHype() public view {

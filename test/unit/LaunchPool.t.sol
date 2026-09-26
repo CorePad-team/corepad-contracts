@@ -135,6 +135,24 @@ contract LaunchPoolTest is Base {
         _buy(pool, bob, 0.05 ether);
     }
 
+    function test_guard_threeSmallBuysCannotExceedCap() public {
+        (LaunchPool pool,) = _launch();
+        // each buy ~0.37 % of supply, any two stay under 1 %, three cross it
+        _buy(pool, bob, 0.0018 ether);
+        _buy(pool, bob, 0.0018 ether);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.GuardExceeded.selector, GUARD_MAX));
+        pool.buy{value: 0.0018 ether}(0, block.timestamp);
+    }
+
+    function test_graduate_revertsBeforeFreezeEvenAfterSales() public {
+        (LaunchPool pool,) = _launch();
+        vm.warp(block.timestamp + GUARD_S);
+        _buy(pool, bob, 1 ether);
+        vm.expectRevert(LaunchPool.NotFrozen.selector);
+        pool.graduate();
+    }
+
     function test_guard_singleLargeBuyReverts() public {
         (LaunchPool pool,) = _launch();
         vm.prank(bob);
