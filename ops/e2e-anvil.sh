@@ -45,6 +45,7 @@ send() {
   local st; st=$(echo "$r" | jq -r .status)
   local gas; gas=$(cast to-dec "$(echo "$r" | jq -r .gasUsed)")
   [ "$st" = "0x1" ] || { echo "FAILED $label"; echo "$r" | jq .; exit 1; }
+  LAST_FEE=$(( $(cast to-dec "$(echo "$r" | jq -r .gasUsed)") * $(cast to-dec "$(echo "$r" | jq -r .effectiveGasPrice)") ))
   printf '%-34s gas %8s  tx %s\n' "$label" "$gas" "$(echo "$r" | jq -r .transactionHash)" | tee -a "$GAS_LOG"
 }
 now() { cast block latest --field timestamp --rpc-url "$RPC"; }
@@ -74,6 +75,10 @@ NEED=$(cast call "$POOL" "hypeToGraduate()(uint256)" --rpc-url "$RPC" | awk '{pr
 echo "hypeToGraduate $(cast from-wei "$NEED") HYPE; sending 3 HYPE, excess must be refunded"
 B0=$(cast balance "$TRADER" --rpc-url "$RPC")
 VALUE=3ether send "buy 3 (clipped, refunded)" "$TRADER_PK" "$POOL" "buy(uint256,uint256)" 0 $(( $(now) + 60 ))
+B1=$(cast balance "$TRADER" --rpc-url "$RPC")
+SPENT=$(python3 -c "print($B0 - $B1 - $LAST_FEE)")
+echo "charged $SPENT wei for the crossing buy (hypeToGraduate was $NEED): refund $(python3 -c "print(3*10**18 - $SPENT)") wei"
+[ "$SPENT" = "$NEED" ] || { echo "CLIP/REFUND MISMATCH"; exit 1; }
 echo "frozen=$(cast call "$POOL" "frozen()(bool)" --rpc-url "$RPC") realHype=$(cast call "$POOL" "realHype()(uint256)" --rpc-url "$RPC")"
 
 echo "== graduate (permissionless)"
