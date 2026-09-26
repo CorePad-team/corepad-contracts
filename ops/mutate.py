@@ -21,8 +21,8 @@ MUTANTS = [
     ("graduate-keeps-dust", "src/LaunchPool.sol", "uint256 hype = address(this).balance; // realHype + any forced dust", "uint256 hype = realHype / 2;"),
     ("guard-per-call", "src/LaunchPool.sol", "guardBought[msg.sender] = used;", "guardBought[msg.sender] = tokensOut;"),
     ("guard-disabled", "src/LaunchPool.sol", "if (block.timestamp < launchedAt + guardSeconds) {", "if (block.timestamp < launchedAt) {"),
-    ("buy-rounds-up", "src/LaunchPool.sol", "tokensOut = y * net / (x + net); // rounds down", "tokensOut = (y * net + x + net - 1) / (x + net); // rounds up"),
-    ("sell-rounds-up", "src/LaunchPool.sol", "uint256 gross = x * tokensIn / (y + tokensIn); // rounds down", "uint256 gross = x * tokensIn / (y + tokensIn) + 1;"),
+    ("buy-rounds-up", "src/LaunchPool.sol", "tokensOut = y * net / (x + net); // rounds down", "tokensOut = (y * net + x + net - 1) / (x + net); //"),
+    ("sell-rounds-up", "src/LaunchPool.sol", "uint256 gross = x * tokensIn / (y + tokensIn); // rounds down", "uint256 gross = x * tokensIn / (y + tokensIn) + 1; //"),
     ("rescue-no-delay", "src/Settlement.sol", "if (block.timestamp < at) revert TooEarly(at);", ""),
     ("rescue-no-eth", "src/Settlement.sol", "treasury.forceSafeTransferETH(hype);\n        emit Rescued", "emit Rescued"),
     ("dispatch-keeps-lock", "src/Settlement.sol", "        lockedHype -= hype;\n\n        IBridgeAdapter a", "\n        IBridgeAdapter a"),
@@ -63,7 +63,8 @@ def main():
             else:
                 verdict = "KILLED" if code_all != 0 else "SURVIVED"
             by_inv = "yes" if code_inv != 0 else "no"
-            failing = sorted(set(re.findall(r"\[FAIL[^\n]*?\]\s*((?:test|invariant)\w+)\(", out_all)))
+            failing = sorted(set(re.findall(r"\[FAIL[^\n]*?\]\s*((?:test|invariant)\w+)\(", out_all)
+                                 + re.findall(r"^\s+(invariant_\w+)\(", out_all, re.M)))
             results.append((name, verdict, by_inv, failing[:4]))
             print(f"{name:28s} {verdict:9s} invariants={by_inv:3s} {', '.join(failing[:4])}", flush=True)
         finally:
