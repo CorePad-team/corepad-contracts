@@ -1,0 +1,39 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false
+remappings = [
+  "forge-std/=lib/forge-std/src/",
+  "solady/=lib/solady/src/",
+]
+fs_permissions = [
+  { access = "read-write", path = "./deployments" },
+  { access = "read", path = "./out" },
+  { access = "write", path = "./cache/invariant-coverage.txt" },
+]
+
+[profile.default.fuzz]
+runs = 1000
+
+[profile.default.invariant]
+runs = 256
+depth = 60
+fail_on_revert = false
+
+[rpc_endpoints]
+elysium = "${ELYSIUM_RPC}"
+hyperevm_testnet = "${HYPEREVM_TESTNET_RPC}"
+
+[fmt]
+line_length = 110
+
+[lint]
+lint_on_build = false

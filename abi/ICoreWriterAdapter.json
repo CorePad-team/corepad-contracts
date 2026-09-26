@@ -1,0 +1,15 @@
+[
+  {
+    "type": "function",
+    "name": "isCoreWriterAdapter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]
