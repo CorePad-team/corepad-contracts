@@ -128,7 +128,8 @@ contract Handler is Test {
     }
 
     function warp(uint256 dt) external {
-        vm.warp(block.timestamp + bound(dt, 1, 3 days));
+        // short steps while the launch guard is on, so several guarded buys land in the window
+        vm.warp(block.timestamp + (pool.guardActive() ? bound(dt, 1, 15) : bound(dt, 1, 3 days)));
     }
 
     /// Directed step so campaigns reach freeze/graduation/dispatch/rescue (1 call in 4 acts).

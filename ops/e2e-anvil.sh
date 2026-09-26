@@ -17,7 +17,8 @@ GAS_LOG=deployments/99801.anvil-fork.gas.txt
 
 # refuse to reuse an orphan anvil on the port
 if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then echo "port $PORT busy" >&2; exit 1; fi
-anvil --fork-url "$FORK_URL" --port "$PORT" --silent &
+# distinct chain id: the rehearsal can never be mistaken for (or overwrite the broadcast log of) 99801
+anvil --fork-url "$FORK_URL" --port "$PORT" --chain-id 31337 --silent &
 ANVIL_PID=$!
 trap 'kill $ANVIL_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 60); do cast chain-id --rpc-url "$RPC" >/dev/null 2>&1 && break; sleep 0.5; done
@@ -31,7 +32,7 @@ cast rpc anvil_setBalance "$TRADER" 0x56BC75E2D63100000 --rpc-url "$RPC" >/dev/n
 cast rpc anvil_setCode 0x0000000000000000000000000000000000000064 "$(forge inspect MockArbSys deployedBytecode)" --rpc-url "$RPC" >/dev/null
 
 echo "== deploy (anvil fork)"
-DEPLOY_MODE=anvil-fork DEPLOYMENT_FILE="$OUT" \
+ALLOW_ANY_CHAIN=true DEPLOY_MODE=anvil-fork DEPLOYMENT_FILE="$OUT" \
   forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast -q >/dev/null
 FACTORY=$(jq -r .CorePadFactory "$OUT"); SETTLEMENT=$(jq -r .Settlement "$OUT"); ADAPTER=$(jq -r .ElysiumBridgeAdapter "$OUT")
 echo "factory $FACTORY settlement $SETTLEMENT adapter $ADAPTER"
