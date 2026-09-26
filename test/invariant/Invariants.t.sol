@@ -80,6 +80,7 @@ contract InvariantsTest is Base {
 
     function invariant_rescueAlwaysDrains() public view {
         assertFalse(handler.rescueFailed());
+        assertFalse(handler.earlyRescue());
     }
 
     /// Coverage sanity (visible with -vv): the handler must actually reach the interesting states.

@@ -31,6 +31,8 @@ contract Handler is Test {
     uint256 public sells;
     uint256 public frozenAttempts;
     uint256 public rescues;
+    bool public earlyRescue;
+    mapping(address => uint256) public ghostGuardBought;
 
     constructor(
         LaunchPool pool_,
@@ -70,7 +72,6 @@ contract Handler is Test {
         uint256 y0 = pool.virtualToken();
         uint256 t0 = treasury.balance;
         uint256 b0 = a.balance;
-        uint256 g0 = pool.guardBought(a);
         bool guardOn = pool.guardActive();
         vm.prank(a);
         try pool.buy{value: value}(0, block.timestamp) returns (uint256 out) {
@@ -82,7 +83,10 @@ contract Handler is Test {
             if (fee != spent / 100) feeMismatch = true;
             // exact marginal price x/y must strictly rise: x1 * y0 > x0 * y1
             if (pool.virtualHype() * y0 <= x0 * pool.virtualToken()) priceNotUpOnBuy = true;
-            if (guardOn && g0 + out > pool.guardMaxPerAddress()) guardBreached = true;
+            if (guardOn) {
+                ghostGuardBought[a] += out; // independent cumulative count
+                if (ghostGuardBought[a] > pool.guardMaxPerAddress()) guardBreached = true;
+            }
             _checkK();
         } catch {
             if (wasFrozen) frozenAttempts++;
@@ -159,6 +163,19 @@ contract Handler is Test {
         if (id == 0) return;
         if (registerFirst) bridge.register(address(token));
         try settlement.dispatch(id) {} catch {}
+    }
+
+    function rescueEarly(uint256 dt) external {
+        uint256 id = pool.ticketId();
+        if (id == 0 || settlement.stateOf(id) != Settlement.State.Open) return;
+        Settlement.Ticket memory t = settlement.getTicket(id);
+        uint256 at = t.createdAt + settlement.rescueDelay();
+        if (block.timestamp >= at) return;
+        vm.warp(block.timestamp + bound(dt, 0, at - block.timestamp - 1));
+        vm.prank(treasury);
+        try settlement.rescue(id) {
+            earlyRescue = true;
+        } catch {}
     }
 
     function rescue() external {
