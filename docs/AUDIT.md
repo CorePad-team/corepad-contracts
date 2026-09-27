@@ -21,6 +21,36 @@ risks are in the design and the trust model:
 4. If `setFactory` is set wrong, every pool that reaches 800 M freezes for good. A pool has no escape hatch
    of its own (M-4).
 
+## Resolution (2026-09-27, commits `fb9f9c0`..HEAD)
+
+The findings below are kept as written at audit time. This table records what changed afterwards. Every PoC
+in `test/audit/AuditPoC.t.sol` is now a regression test that replays the exploit and asserts it fails.
+
+| ID | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| M-1 | Medium | Duplicate / reserved / squattable symbols | **Fixed** (on-chain part). Symbols unique across launches (`CorePadFactory._launchOfSymbol`, `SymbolTaken(id)`); 13 reserved tickers refused (`SymbolRules.isReserved`: HYPE, USDC, USDT, USDE, USDH, PURR, BTC, ETH, SOL, UBTC, UETH, USOL, HFUN). HyperCore squatting after launch can't be prevented on-chain: the keeper checks `spotMeta` before dispatch and before `registerToken2`, never dispatches a taken ticker, and the ticket can then be aborted (M-2 fix). | `test_regression_M1_duplicateAndReservedSymbolsRejected`, `test_symbols_*`, mutants `symbol-*`, `keeper.py --check-ticker` |
+| M-2 | Medium | `rescue` confiscated the raise | **Fixed.** `rescue` removed. `abort(id)` is permissionless after `rescueDelay` on an Open ticket: HYPE + book tokens go back to the pool, `reopen()` un-freezes the curve where it stopped, every holder can sell, and the launch can graduate again (new ticket). The treasury receives nothing. | `test_regression_M2_abortReturnsRaiseToHoldersNotTreasury`, `test_abort_fullCycle_holdersSell_thenRegraduate`, `invariant_abortReopensForHolders`, mutants `abort-*`/`reopen-*`, e2e abort scenario |
+| M-3 | Medium | No on-chain recourse after dispatch | **Open (trust, documented).** Mitigated: the keeper does not dispatch a ticket whose ticker is taken, and an undispatched ticket can always be aborted. Custody after dispatch is unchanged (a HyperEVM settler contract with a refund route is future work). | README "Trust model", keeper `check_ticker` |
+| M-4 | Medium | Wrong `setFactory` froze pools forever | **Fixed.** `setFactory` requires `factory.settlement() == this` and `factory.treasury() == treasury` (`FactoryMismatch`). Defence in depth: a stuck ticket can be aborted. | `test_regression_M4_wrongFactoryRejected`, mutant `setfactory-unchecked` |
+| L-1 | Low | Single-tx multi-contract guard bypass | **Fixed.** The guard is also cumulative per `tx.origin` (`guardBoughtByOrigin`); the 81-minion PoC now reverts on the second minion. Separate transactions from many EOAs remain a documented limit. | `test_regression_L1_singleTxSybilBlockedByOriginGuard`, `test_guard_originCapsRelayedBuys`, mutants `guard-origin-*` |
+| L-2 | Low | Forced HYPE / donations stuck | **Fixed.** Permissionless `sweep(asset)` on Settlement (balance − `lockedHype`, balance − `lockedTokens[token]`), the adapter (holds nothing between calls) and a graduated pool, to the immutable treasury only. Accounted funds are never touched. | `test_regression_L2_surplusSweptAccountedUntouched`, `invariant_sweepNeverTouchesAccounted`, mutants `sweep-*` |
+| L-3 | Low | Unbounded constructor params | **Fixed.** `guardSeconds ≤ 1 h`, `rescueDelay ∈ [1 d, 30 d]`, `graduationHype ≥ 0.01 HYPE` and `× 273 % 800 == 0`, `tickerReserve < graduationHype`, `0 < guardMaxPerAddress ≤ 800 M`. | `test_regression_L3_hugeGuardSecondsRejected`, `test_factory_boundsParams`, `test_rescueDelay_bounded`, mutants `*-unbounded` |
+| L-4 | Low/Med | Single hot key by default | **Open (operational).** Unchanged for testnet; mainnet must use distinct keys (treasury multisig, dedicated keeper). The treasury no longer receives raises (M-2), which narrows what that key controls on Elysium. | README parameters |
+| L-5 | Low | `createL2Wallet` returndata / bridge assumptions | **Fixed (returndata) + QA bug 6.** Low-level call copying ≤ 32 bytes of returndata; short data cannot revert the launch. The call gets a fixed 1 M gas stipend and the launch reverts (`BridgeWalletOutOfGas`) unless the whole stipend can be forwarded, so an exact gas estimate converges on a limit where the wallet is created. A post-call 1/64 check was tried first and fails on the live factory: it is a proxy, and a nested out-of-gas leaves the caller well above 1/64. Mirror squatting / retryable expiry / bridge upgradeability: still unverified, but a blocked route now ends in `abort`, not confiscation. | `test_bridgeWallet_*`, fork `test_fork_launchAtExactEstimateCreatesWallet` (live factory, minimal gas 3,273,039), e2e `l2WalletFor == predictL2Wallet`, mutant `bridge-stipend-unchecked` |
+| I-1 | Info | Fee floored | Accepted. | `test_info_I1_subHundredWeiBuyPaysNoFee` |
+| I-2 | Info | Keeper confirms arbitrary indexes | Accepted on-chain; the keeper now refuses `confirm` unless the Core token index (from the `registerToken2` response) and the TOKEN/USDC spot index (filtered on this token + USDC) are both known. | `test_info_I2_keeperConfirmsArbitraryIndexes`, `ops/keeper/test_keeper.py` |
+| I-3 | Info | Dust tokens unsellable | Accepted. | invariant handler skips zero-quote dust |
+| I-4 | Info | MEV / minimums | Accepted; the app passes slippage minimums. | — |
+| I-5 | Info | Adapter permissionless | Accepted. | — |
+| I-6 | Info | Sequencer timestamp | Accepted. | — |
+| I-7 | Info | HIP-1 name rules | Partly: reserved list + keeper `spotMeta` check. Core-side rules still unverified. | — |
+| I-8 | Info | `Ticket.pool` unused; untested branches | Fixed: `Ticket.pool` is the abort target; `coreSettler()` view tested. | `test_coreSettlerView` |
+
+Post-fix tooling: `forge test` 71 passed + 4 fork tests passed with `ELYSIUM_FORK=true` (75); invariants 11
+(256 × 60); `ops/mutate.py` 34/34 mutants killed (20 by the invariant suite alone); `ops/e2e-anvil.sh` PASS
+(launch at cast's estimate creates the wallet → graduate → early abort reverts → abort → both holders sell,
+pool HYPE == realHype → re-graduate (ticket 2) → dispatch → confirm; treasury balance unchanged by the abort).
+
 ## Tooling results
 
 * `forge test`: 44 passed, 3 skipped (fork tests need `ELYSIUM_FORK=true` + RPC; not run here), 0 failed.
@@ -318,17 +348,18 @@ keeper key or, better, a contract (see M-3).
   testnet parameters are internally consistent. The exception is `tickerReserve`, which cannot pay a
   testnet ticker (M-3).
 
-## PoC index (`test/audit/AuditPoC.t.sol`, uncommitted)
+## PoC index (`test/audit/AuditPoC.t.sol`)
 
-Each test **passes while the finding is present**. Run: `forge test --match-path "test/audit/*" -vv`.
+At audit time each test **passed while the finding was present**. After the fixes they were converted to
+regression tests that replay the exploit and assert it now fails. Run: `forge test --match-path "test/audit/*" -vv`.
 
-| Test | Finding |
-|---|---|
-| `test_poc_duplicateAndReservedSymbolsAccepted` | M-1 |
-| `test_poc_rescueConfiscatesRaiseHoldersStranded` | M-2 |
-| `test_poc_wrongFactoryLocksFrozenPoolForever` | M-4 |
-| `test_poc_singleTxSybilFillsCurveInsideGuard` | L-1 (81 addresses, 1.515 HYPE, one tx) |
-| `test_poc_forcedEthAndDonationsStuck` | L-2 |
-| `test_poc_hugeGuardSecondsBricksBuys` | L-3 |
-| `test_poc_subHundredWeiBuyPaysNoFee` | I-1 |
-| `test_poc_keeperConfirmsArbitraryIndexes` | I-2 |
+| Original PoC | Finding | Resolution | Regression test (now) |
+|---|---|---|---|
+| `test_poc_duplicateAndReservedSymbolsAccepted` | M-1 | Fixed | `test_regression_M1_duplicateAndReservedSymbolsRejected` |
+| `test_poc_rescueConfiscatesRaiseHoldersStranded` | M-2 | Fixed (abort → reopen) | `test_regression_M2_abortReturnsRaiseToHoldersNotTreasury` |
+| `test_poc_wrongFactoryLocksFrozenPoolForever` | M-4 | Fixed | `test_regression_M4_wrongFactoryRejected` |
+| `test_poc_singleTxSybilFillsCurveInsideGuard` | L-1 (81 addresses, 1.515 HYPE, one tx) | Fixed (tx.origin guard) | `test_regression_L1_singleTxSybilBlockedByOriginGuard` |
+| `test_poc_forcedEthAndDonationsStuck` | L-2 | Fixed (bounded sweeps) | `test_regression_L2_surplusSweptAccountedUntouched` |
+| `test_poc_hugeGuardSecondsBricksBuys` | L-3 | Fixed (bounds) | `test_regression_L3_hugeGuardSecondsRejected` |
+| `test_poc_subHundredWeiBuyPaysNoFee` | I-1 | Accepted | `test_info_I1_subHundredWeiBuyPaysNoFee` |
+| `test_poc_keeperConfirmsArbitraryIndexes` | I-2 | Accepted on-chain; keeper refuses unknown indexes | `test_info_I2_keeperConfirmsArbitraryIndexes` |

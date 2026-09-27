@@ -11,7 +11,8 @@ lists a graduated launch on a HyperCore spot book. `SPEC.md` is the shared sourc
 ```
                          Elysium (ArbOS 51, chain 99801)                               HyperEVM 998            HyperCore
  creator ──launch()──▶ CorePadFactory ──new──▶ LaunchPool ──new──▶ CorePadToken (1e27 minted to pool)
-                          │   └─ createL2Wallet(token) on ElysiumBridgeFactory (try/catch)
+                          │   ├─ symbol unique across launches, 13 reserved tickers refused
+                          │   └─ createL2Wallet(token) on ElysiumBridgeFactory (low-level call, fixed 1 M gas stipend)
  traders ──buy/sell──▶ LaunchPool   virtual x·y curve, 1 % fee ──▶ treasury (same tx)
                           │ 800 M sold → frozen
  anyone ──graduate()──▶ LaunchPool ──HYPE + 200 M + dust──▶ Settlement: Ticket{Open}
@@ -24,22 +25,25 @@ lists a graduated launch on a HyperCore spot book. `SPEC.md` is the shared sourc
                                           link, registerSpot, registerHyperliquidity, deposit, HYPE→USDC,
                                           symmetric ladder around listPrice ─────────────────────▶ TOKEN/USDC
  keeper ──confirm(id, tokenIndex, spotIndex)──▶ Settlement: Ticket{Confirmed}
- treasury ──rescue(id) after 7 days, Open tickets only──▶ Settlement ──HYPE + tokens──▶ treasury
+ anyone ──abort(id) after rescueDelay, Open tickets only──▶ Settlement ──HYPE + tokens──▶ LaunchPool.reopen()
+                                          (curve resumes where it stopped; holders sell; may graduate again)
+ anyone ──sweep(asset)──▶ Settlement / adapter / graduated pool ──unaccounted surplus only──▶ treasury
 ```
 
 | Contract | Role |
 |---|---|
-| `src/CorePadToken.sol` | Plain ERC-20 (solady). 1,000,000,000 × 1e18 minted once to its pool. Name/symbol packed in `bytes32` immutables, 18 decimals, no owner/mint/fee/rebase, no implicit Permit2 allowance. Symbol `[A-Z0-9]{1,6}` (it is the HyperCore ticker). |
-| `src/CorePadFactory.sol` | No owner. `launch(name, symbol, minTokensOut)` payable. Curve parameters fixed at construction and snapshotted into every pool. Calls `createL2Wallet(token)`; a bridge outage never blocks a launch. Optional creator buy capped at 2 % of supply, excess refunded. |
-| `src/LaunchPool.sol` | Constant product on virtual reserves: `virtualHype0 = graduationHype × 273 / 800`, `virtualToken0 = 1.073e27`. Selling exactly 800 M raises exactly `graduationHype` net of fees (+ a few wei of rounding, always in the pool's favour). 1 % of the HYPE leg of every trade is force-sent to `treasury` in the same tx. Crossing buy clipped + refunded. Frozen at 800 M. Launch guard: cumulative cap per address during `guardSeconds`. `graduate()` permissionless. Slippage (`minTokensOut`, `minHypeOut`) + `deadline` on every trade. |
-| `src/Settlement.sol` | Tickets. `openTicket` only from factory-registered pools. `dispatch` permissionless, `confirm` keeper-only, `rescue` treasury-only after `rescueDelay` on open tickets. Set-once `factory` and `coreWriterAdapter` (reserved, unused in v0). |
-| `src/ElysiumBridgeAdapter.sol` | Stateless. Tokens through the mirror bridge (approval = exact amount to the token's escrow wallet, asserted fully pulled, reset to 0), HYPE through `ArbSys.withdrawEth`. Recipient = immutable `coreSettler`. Refuses unless the router routes the mirror through the Elysium custom gateway. |
+| `src/CorePadToken.sol` | Plain ERC-20 (solady). 1,000,000,000 × 1e18 minted once to its pool. Name/symbol packed in `bytes32` immutables, 18 decimals, no owner/mint/fee/rebase, no implicit Permit2 allowance. Symbol `[A-Z0-9]{1,6}` (it is the HyperCore ticker), rules in `src/SymbolRules.sol`. |
+| `src/CorePadFactory.sol` | No owner. `launch(name, symbol, minTokensOut)` payable. Symbols unique across launches (`launchOfSymbol`, `isSymbolAvailable`) and 13 major tickers reserved (HYPE, USDC, USDT, USDE, USDH, PURR, BTC, ETH, SOL, UBTC, UETH, USOL, HFUN). Curve parameters bounded and fixed at construction, snapshotted into every pool. Calls `createL2Wallet(token)` with a fixed 1 M gas stipend: an outage is skipped (`BridgeWalletSkipped`), but a gas limit too tight to forward the stipend reverts the launch (`BridgeWalletOutOfGas`), so an exact gas estimate never silently skips the wallet. Optional creator buy capped at 2 % of supply, excess refunded. |
+| `src/LaunchPool.sol` | Constant product on virtual reserves: `virtualHype0 = graduationHype × 273 / 800`, `virtualToken0 = 1.073e27`. Selling exactly 800 M raises exactly `graduationHype` net of fees (+ a few wei of rounding, always in the pool's favour). 1 % of the HYPE leg of every trade is force-sent to `treasury` in the same tx. Crossing buy clipped + refunded. Frozen at 800 M (`frozen` flag). Launch guard: cumulative cap per `msg.sender` **and** per `tx.origin` during `guardSeconds`. `graduate()` permissionless. `reopen()` (Settlement only, on abort) un-freezes the curve where it stopped. `sweep` sends surplus to the treasury once graduated. Slippage (`minTokensOut`, `minHypeOut`) + `deadline` on every trade. |
+| `src/Settlement.sol` | Tickets. `openTicket` only from factory-registered pools. `dispatch` permissionless, `confirm` keeper-only, `abort` permissionless after `rescueDelay` on open tickets (assets back to the pool, trading reopens; the treasury gets nothing). `sweep` moves only balance − `lockedHype` / − `lockedTokens[token]`. Set-once `factory` (checked: `factory.settlement() == this`, `factory.treasury() == treasury`) and `coreWriterAdapter` (reserved, unused in v0). |
+| `src/ElysiumBridgeAdapter.sol` | Stateless. Tokens through the mirror bridge (approval = exact amount to the token's escrow wallet, asserted fully pulled, reset to 0), HYPE through `ArbSys.withdrawEth`. Recipient = immutable `coreSettler`. Refuses unless the router routes the mirror through the Elysium custom gateway. Holds nothing between calls: `sweep` sends anything left on it to the immutable `treasury`. |
 
 Every value push is behind a transient reentrancy guard (ArbOS 51 supports `TSTORE`, verified by `eth_call`).
 There is no arbitrary call, free spender or free calldata anywhere; each exit is a named transfer to a fixed
-party: the trader (refund / sell proceeds), `treasury` (fees, rescue), Settlement (graduation), the adapter
-(dispatch, bounded by the ticket), `coreSettler` (bridge). Fees and rescues use `forceSafeTransferETH`, so a
-treasury that rejects ETH cannot brick a pool or a rescue.
+party: the trader (refund / sell proceeds), `treasury` (fees and swept surplus only), Settlement (graduation),
+the ticket's own pool (abort, exactly the ticket amounts), the adapter (dispatch, bounded by the ticket),
+`coreSettler` (bridge). Fees and sweeps use `forceSafeTransferETH`, so a treasury that rejects ETH cannot brick
+a pool.
 
 ## Trust model (stated plainly)
 
@@ -59,12 +63,17 @@ treasury that rejects ETH cannot brick a pool or a rescue.
   `registerToken2.maxGas` is capped by it. If the auction is above budget the keeper waits; it never tops up.
   **On testnet this does not close today:** the HyperCore testnet auction ran 1439.9 → 1259.7 HYPE on
   2026-09-26 while the testnet `tickerReserve` is 0.5 HYPE.
-* **Never locked.** If a ticket is not dispatched within `rescueDelay` (7 days), the immutable `treasury`
-  can pull its HYPE and tokens in one transaction (proved by `invariant_rescueAlwaysDrains` and
-  `test_rescue_treasuryOnlyAfterDelay`). A dispatched ticket's assets are in the bridge, whose failures are
-  "delay, not loss" (re-executable retryables/outbox entries).
-* **The launch guard is per address.** It stops one address from taking more than 1 % in the first minute; it
-  does not stop someone who uses many addresses. It is a speed bump, not sybil resistance.
+* **Never locked, never confiscated.** If a ticket is not dispatched within `rescueDelay` (7 days) of
+  graduation, **anyone** can `abort(id)`: its HYPE and book tokens go back to the pool, the curve reopens
+  exactly where it stopped (virtual reserves untouched, `realHype` restored), every holder can sell back, and
+  the launch can graduate again later with a new ticket. The treasury receives nothing from an abort (proved by
+  `invariant_abortReopensForHolders`, which sells every holder out after each abort, and
+  `test_abort_fullCycle_holdersSell_thenRegraduate`). A dispatched ticket's assets are in the bridge / keeper
+  custody (see `docs/AUDIT.md` M-3). The keeper checks that the ticker is free on HyperCore before
+  dispatching; if it is taken, it does not dispatch and the ticket can be aborted.
+* **The launch guard is per address and per transaction origin.** It stops one EOA from taking more than 1 %
+  in the first minute, including by fanning out through fresh contracts inside one transaction. It does not
+  stop someone who sends separate transactions from many EOAs. It is a speed bump, not sybil resistance.
 * Deployer powers: `setFactory` and `setCoreWriterAdapter`, each callable once. No upgradeability, no pause,
   no parameter setters.
 
@@ -74,8 +83,9 @@ treasury that rejects ETH cannot brick a pool or a rescue.
 |---|---|---|
 | `graduationHype` | 1.5 HYPE | curve raises exactly this (net of fees) at 800 M sold |
 | `tickerReserve` | 0.5 HYPE | becomes `tickerBudget`; mainnet ≥ 500 HYPE |
-| `guardSeconds` / `guardMaxPerAddress` | 60 s / 10 M tokens (1 %) | |
-| `rescueDelay` | 7 days | |
+| `guardSeconds` / `guardMaxPerAddress` | 60 s / 10 M tokens (1 %) | bounded: ≤ 1 h / ≤ 800 M |
+| `rescueDelay` | 7 days | abort delay after graduation, bounded 1–30 days |
+| `graduationHype` bounds | ≥ 0.01 HYPE, `× 273 % 800 == 0` | `tickerReserve < graduationHype` |
 | `treasury` = `coreSettler` = `keeper` | deployer `0xD9ecD1bb…E03f` | override with `TREASURY`, `CORE_SETTLER`, `KEEPER` |
 | fee | 1 % of the HYPE leg | constant |
 
@@ -87,16 +97,23 @@ ELYSIUM_FORK=true forge test --match-path "test/fork/*" -vv   # live Elysium for
 python3 ops/mutate.py                        # hand mutants; requires a clean, committed src/
 ```
 
-* 44 unit/fuzz/invariant tests + 3 fork tests.
-* Invariants (`test/invariant`): pool balance == `realHype` (== `virtualHype − virtualHype0`); token
-  supply conserved across every holder; `x·y` never decreases; exact marginal price strictly up on every buy;
-  fee == ⌊1 % of the HYPE leg⌋ and treasury == Σ fees + rescues; no trade after freeze; launch guard holds
-  (independent ghost count); graduation raises `graduationHype` (+ ≤ 1000 wei); Settlement balance ==
-  `lockedHype`; rescue always drains an open ticket, never early; no early graduation.
-* Mutation run (`ops/mutate.py`): 16 hand mutants on fee, clip, freeze, guard, rounding, graduation, rescue,
-  dispatch accounting and the adapter's escrow check — 16/16 killed, 15 by the invariant suite alone (the
-  adapter shortfall mutant is killed by a unit test). The script wipes `cache/invariant/failures` after each
-  mutant (a cached counterexample replays on healthy code) and checks `src/` is restored.
+* 71 unit/fuzz/invariant/regression tests + 4 fork tests (75 with `ELYSIUM_FORK=true`), plus
+  `python3 ops/keeper/test_keeper.py` (7 offline keeper checks: ladder, indexes, spot pair filter).
+* `test/audit/AuditPoC.t.sol`: the audit PoCs, converted to regression tests that replay each exploit and
+  assert it now fails.
+* Invariants (`test/invariant`, 11): pool balance == `realHype` (+ tracked forced dust) while trading,
+  including after an abort; token supply conserved across every holder; `x·y` never decreases; exact marginal
+  price strictly up on every buy; fee == ⌊1 % of the HYPE leg⌋ and treasury == Σ fees + swept surplus (never
+  an abort); no trade after freeze; launch guard holds (independent ghost count); graduation raises
+  `graduationHype` (+ ≤ 1000 wei); Settlement holds exactly `lockedHype`/`lockedTokens` + tracked surplus;
+  abort never early, always succeeds when due, pays the treasury nothing, and afterwards every holder can sell;
+  sweeps never touch accounted funds. The handler forces HYPE and donates tokens to the pool, Settlement and
+  adapter, sweeps, aborts and re-graduates (hundreds of campaigns reach a second graduation).
+* Mutation run (`ops/mutate.py`): 34 hand mutants on fee, clip, freeze, guard (per sender and per origin),
+  rounding, graduation, abort/reopen, dispatch accounting, symbol uniqueness/reserved list, sweep bounds,
+  `setFactory` check, parameter bounds, the bridge-wallet stipend and the adapter's escrow check — 34/34 killed,
+  20 by the invariant suite alone. The script wipes `cache/invariant/failures` after each mutant (a cached
+  counterexample replays on healthy code) and checks `src/` is restored.
 * Fork tests: anvil/forge forks have **no ArbOS precompiles**, so `MockArbSys` is `vm.etch`ed at `0x64`
   (serves `withdrawEth` and the gateway's `sendTxToL1`). Everything else is live bytecode: `createL2Wallet`,
   the Router path with the live registered ETT token, and a full lifecycle where the HyperEVM registration
@@ -107,7 +124,8 @@ python3 ops/mutate.py                        # hand mutants; requires a clean, c
 ```
 ops/deploy.sh dry-run                 # simulate on the live RPC, writes deployments/99801.json (mode=dry-run)
 CONFIRM=yes ops/deploy.sh broadcast   # real deploy; refuses if unfunded / wrong host / key mismatch
-ops/e2e-anvil.sh                      # local anvil fork: deploy → launch → buys → graduate → dispatch → confirm
+ops/e2e-anvil.sh                      # local anvil fork: deploy → launch → buys → graduate → abort → holders sell
+                                      #   → re-graduate → dispatch → confirm
 ops/export-abi.sh                     # abi/*.json (plain JSON arrays)
 ```
 
@@ -120,14 +138,14 @@ L1 data component):
 
 | call | gas |
 |---|---|
-| deploy (4 txs, node estimate) | 6,322,466 |
-| `launch` + creator buy + live `createL2Wallet` | 2,449,895 |
-| first `buy` inside the guard | 113,616 |
-| `buy` | 74,167 |
-| `sell` | 85,845 |
-| crossing `buy` (clip + refund) | 84,776 |
-| `graduate` | 354,618 |
-| `dispatch` (live router/gateway/wallet, mocked ArbSys) | 324,443 |
+| `launch` + creator buy + live `createL2Wallet` | 2,745,896 used; the gas **limit** must be ≥ ~3.27 M (the 1 M stipend must be forwardable; unused gas is refunded) |
+| first `buy` inside the guard | 135,992 |
+| `buy` | 74,171 |
+| `sell` | 85,862 |
+| crossing `buy` (clip + refund) | 87,792 |
+| `graduate` | 374,835 |
+| `abort` (assets back to the pool, reopen) | 116,373 |
+| `dispatch` (live router/gateway/wallet, mocked ArbSys) | 325,641 |
 | `confirm` | 56,315 |
 
 ## Keeper (`ops/keeper/keeper.py`)
@@ -142,7 +160,13 @@ Per ticket: register mirror (HyperEVM) → wait for the route → `dispatch` →
 Outbox → HYPE to Core → `registerToken2` (maxGas ≤ `tickerBudget`) → deposit wallet → `userGenesis` +
 `genesis` (whole 1e9 supply to the system address, `noHyperliquidity`) → `requestEvmContract` +
 `finalizeEvmContract(customStorageSlot)` → `registerSpot` + `registerHyperliquidity(nOrders=0)` → deposit the
-book tokens → IOC HYPE→USDC → symmetric post-only ladder around `listPrice` → `confirm`. State is persisted
+book tokens → IOC HYPE→USDC → post-only ladder around `listPrice` → `confirm`. Before dispatch (and again
+before `registerToken2`) it checks the symbol is free on HyperCore (`spotMeta`); if taken it stops and says so
+(`--check-ticker SYMBOL` does just that check). The ladder puts every ask strictly above and every bid
+strictly below `listPrice` on valid Core ticks and merges levels that collapse onto the same tick (and levels
+under the 10 USDC order minimum), so 100 % of the book tokens and USDC are placed. `confirm` is refused unless
+both the Core token index (taken from the `registerToken2` response, never looked up by symbol) and the
+TOKEN/USDC spot index (filtered on this token and the USDC quote) are known. State is persisted
 per ticket so it resumes. It reads tickets only from the Settlement address (a look-alike `Graduated` from
 another contract is ignored).
 
@@ -153,11 +177,13 @@ Verification status, printed next to every step:
 * **Not verified against the testnet API (never submitted):** `registerToken2`, `userGenesis`, `genesis`,
   `requestEvmContract`, `finalizeEvmContract`, `registerSpot`, `registerHyperliquidity`, the IOC swap and the
   ladder orders — shapes are the SDK encoder's (0.24.0) and the Elysium docs'. Outbox claiming is stock Nitro
-  but not exercised (no live dispatched ticket). How the spot pair index is read back after `registerSpot` is
-  a guess (`spotMeta.universe`, then `spotDeployState`).
+  but not exercised (no live dispatched ticket). The shape of the `registerToken2` response (where the token
+  index sits) is not verified; if it carries none, the keeper stops rather than guess (`--token-index`, checked
+  against the keeper's `spotDeployState`, resumes).
 * **Blocked on testnet:** the `HyperCoreDepositFactory` is pre-launch (no address), so deposit-wallet creation
   and token deposit cannot run; the ticker auction (~1260+ HYPE) exceeds the 0.5 HYPE budget; and at 1.5 HYPE
-  graduation the book price (~2.6e-7 USDC) sits on a 4 % HyperCore tick, so the ladder collapses to ~2 levels.
+  graduation the book price (~2.5e-7 USDC) sits on a 4 % HyperCore tick, so the 10+10 ladder merges into
+  2 ask levels and 1 bid level (still 100 % placed).
 
 ## Layout
 
