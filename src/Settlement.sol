@@ -8,21 +8,32 @@ import {ICoreWriterAdapter} from "./interfaces/ICoreWriterAdapter.sol";
 
 interface IPoolRegistry {
     function isPool(address pool) external view returns (bool);
+    function settlement() external view returns (address);
+    function treasury() external view returns (address);
+}
+
+interface IReopenable {
+    function reopen() external payable;
 }
 
 /// @title Settlement
 /// @notice Receives graduated launches, opens a ticket per launch and moves the assets to HyperEVM.
 ///
 ///         open ──dispatch()──▶ dispatched ──confirm()──▶ confirmed
-///           └──────rescue() after rescueDelay──▶ rescued
+///           └──────abort() after rescueDelay──▶ aborted (assets back to the pool, trading reopened)
 ///
 ///         - `dispatch` is permissionless: it bridges the ticket's tokens (Router) and HYPE (ArbSys)
 ///           to the adapter's immutable `coreSettler` on HyperEVM.
 ///         - `confirm` is keeper-only and records where the book lives on HyperCore.
-///         - `rescue` is treasury-only, only on an open (undispatched) ticket older than
-///           `rescueDelay`: its HYPE and tokens go to the immutable `treasury` in one transaction.
+///         - `abort` is permissionless, only on an open (undispatched) ticket older than
+///           `rescueDelay`: its HYPE and tokens go back to the ticket's own pool, which reopens the
+///           curve where it stopped so holders can sell. The treasury receives nothing from an abort,
+///           and a failed raise is never locked. The pool can graduate again later (new ticket).
+///         - `sweep` is permissionless and moves only UNACCOUNTED surplus (forced HYPE, donated
+///           tokens) to the immutable treasury: balance − lockedHype, balance − lockedTokens[token].
 /// @dev There is no arbitrary call, spender or calldata anywhere. Every exit is a named transfer to an
-///      immutable address: the adapter (bounded by the ticket amounts) or the treasury.
+///      immutable address or to the ticket's own pool: the adapter (bounded by the ticket amounts), the
+///      pool (abort, exactly the ticket amounts) or the treasury (surplus only).
 contract Settlement is ReentrancyGuardTransient {
     using SafeTransferLib for address;
 
@@ -31,7 +42,7 @@ contract Settlement is ReentrancyGuardTransient {
         Open,
         Dispatched,
         Confirmed,
-        Rescued
+        Aborted
     }
 
     struct Ticket {
@@ -54,6 +65,7 @@ contract Settlement is ReentrancyGuardTransient {
     address public immutable treasury;
     address public immutable keeper;
     IBridgeAdapter public immutable adapter;
+    /// @notice Delay after graduation from which an undispatched ticket can be aborted (1–30 days).
     uint256 public immutable rescueDelay;
 
     /// @notice CorePadFactory, set once by the owner (it needs this contract's address at construction).
@@ -66,6 +78,12 @@ contract Settlement is ReentrancyGuardTransient {
     mapping(uint256 => uint256) public ticketOfLaunch;
     /// @notice Sum of HYPE across open tickets (== address(this).balance absent forced ETH).
     uint256 public lockedHype;
+    /// @notice Sum of tokens across open tickets, per token.
+    mapping(address => uint256) public lockedTokens;
+
+    // L-3 bounds.
+    uint256 public constant MIN_RESCUE_DELAY = 1 days;
+    uint256 public constant MAX_RESCUE_DELAY = 30 days;
 
     event FactorySet(address factory);
     event CoreWriterAdapterSet(address adapter);
@@ -83,12 +101,14 @@ contract Settlement is ReentrancyGuardTransient {
         uint256 indexed ticket, address indexed token, address mirror, uint256 hype, uint256 tokens, address coreSettler
     );
     event Confirmed(uint256 indexed ticket, uint64 coreTokenIndex, uint64 spotPairIndex);
-    event Rescued(uint256 indexed ticket, uint256 hype, uint256 tokens);
+    event Aborted(uint256 indexed ticket, address indexed pool, uint256 hype, uint256 tokens);
+    event Swept(address indexed token, uint256 amount);
 
     error ZeroAddress();
     error OnlyOwner();
     error OnlyKeeper();
-    error OnlyTreasury();
+    error BadDelay();
+    error FactoryMismatch();
     error OnlyPool();
     error AlreadySet();
     error BadState(State state);
@@ -100,6 +120,7 @@ contract Settlement is ReentrancyGuardTransient {
         if (owner_ == address(0) || treasury_ == address(0) || keeper_ == address(0) || adapter_ == address(0)) {
             revert ZeroAddress();
         }
+        if (rescueDelay_ < MIN_RESCUE_DELAY || rescueDelay_ > MAX_RESCUE_DELAY) revert BadDelay();
         owner = owner_;
         treasury = treasury_;
         keeper = keeper_;
@@ -113,6 +134,11 @@ contract Settlement is ReentrancyGuardTransient {
         if (msg.sender != owner) revert OnlyOwner();
         if (factory != address(0)) revert AlreadySet();
         if (factory_ == address(0)) revert ZeroAddress();
+        // Back-pointers: the factory's pools must graduate into THIS Settlement and pay THIS treasury,
+        // otherwise every pool reaching 800 M would revert OnlyPool in graduate() (M-4).
+        if (IPoolRegistry(factory_).settlement() != address(this) || IPoolRegistry(factory_).treasury() != treasury) {
+            revert FactoryMismatch();
+        }
         factory = factory_;
         emit FactorySet(factory_);
     }
@@ -158,6 +184,7 @@ contract Settlement is ReentrancyGuardTransient {
             spotPairIndex: 0
         });
         lockedHype += msg.value;
+        lockedTokens[token] += tokens;
         emit Graduated(launchId, id, msg.sender, token, msg.value, tokens, tickerBudget, listPrice);
     }
 
@@ -172,6 +199,7 @@ contract Settlement is ReentrancyGuardTransient {
         uint256 tokens = t.tokens;
         address token = t.token;
         lockedHype -= hype;
+        lockedTokens[token] -= tokens;
 
         IBridgeAdapter a = adapter;
         token.safeApprove(address(a), tokens);
@@ -194,21 +222,46 @@ contract Settlement is ReentrancyGuardTransient {
         emit Confirmed(id, coreTokenIndex, spotPairIndex);
     }
 
-    /// @notice Treasury-only escape hatch for a ticket that was never dispatched.
-    function rescue(uint256 id) external nonReentrant {
-        if (msg.sender != treasury) revert OnlyTreasury();
+    /// @notice Permissionless exit for a ticket that was never dispatched: after `rescueDelay` from
+    ///         graduation, the ticket's HYPE and tokens go back to its pool, which reopens trading on
+    ///         the curve exactly where it stopped. The treasury receives nothing.
+    function abort(uint256 id) external nonReentrant {
         Ticket storage t = _tickets[id];
         if (t.state != State.Open) revert BadState(t.state);
         uint256 at = uint256(t.createdAt) + rescueDelay;
         if (block.timestamp < at) revert TooEarly(at);
-        t.state = State.Rescued;
+        t.state = State.Aborted;
         uint256 hype = t.hype;
         uint256 tokens = t.tokens;
+        address token = t.token;
+        address pool = t.pool;
         lockedHype -= hype;
+        lockedTokens[token] -= tokens;
+        // The launch may graduate again later with a new ticket.
+        ticketOfLaunch[t.launchId] = 0;
 
-        t.token.safeTransfer(treasury, tokens);
-        treasury.forceSafeTransferETH(hype);
-        emit Rescued(id, hype, tokens);
+        token.safeTransfer(pool, tokens);
+        IReopenable(pool).reopen{value: hype}();
+        emit Aborted(id, pool, hype, tokens);
+    }
+
+    /// @notice Permissionless. Pushes UNACCOUNTED surplus only to the immutable treasury:
+    ///         HYPE (`token == address(0)`): balance − lockedHype; a token: balance − lockedTokens[token].
+    function sweep(address token) external nonReentrant returns (uint256 amount) {
+        if (token == address(0)) {
+            amount = address(this).balance - lockedHype;
+            if (amount != 0) treasury.forceSafeTransferETH(amount);
+        } else {
+            amount = token.balanceOf(address(this)) - lockedTokens[token];
+            if (amount != 0) token.safeTransfer(treasury, amount);
+        }
+        emit Swept(token, amount);
+    }
+
+    /// @notice Timestamp from which `abort(id)` is callable (0 when the ticket is not open).
+    function abortableAt(uint256 id) external view returns (uint256) {
+        Ticket storage t = _tickets[id];
+        return t.state == State.Open ? uint256(t.createdAt) + rescueDelay : 0;
     }
 
     // ================================================================ views

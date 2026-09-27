@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {LibString} from "solady/utils/LibString.sol";
+import {SymbolRules} from "./SymbolRules.sol";
 
 /// @title CorePadToken
 /// @notice Plain ERC-20 launched by CorePad. The whole supply (1,000,000,000 tokens) is minted once,
@@ -47,13 +48,6 @@ contract CorePadToken is ERC20 {
     /// @notice A HyperCore ticker is at most 6 characters. The keeper bids for `symbol()` verbatim,
     ///         so the symbol is restricted to 1..6 characters in [A-Z0-9].
     function isValidSymbol(string memory s) public pure returns (bool) {
-        bytes memory b = bytes(s);
-        if (b.length == 0 || b.length > 6) return false;
-        for (uint256 i; i < b.length; ++i) {
-            bytes1 c = b[i];
-            bool ok = (c >= 0x41 && c <= 0x5A) || (c >= 0x30 && c <= 0x39);
-            if (!ok) return false;
-        }
-        return true;
+        return SymbolRules.isValid(s);
     }
 }

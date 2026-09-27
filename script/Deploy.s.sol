@@ -53,7 +53,7 @@ contract Deploy is Script {
         uint256 pk = vm.envUint("PRIVATE_KEY");
 
         vm.startBroadcast(pk);
-        ElysiumBridgeAdapter adapter = new ElysiumBridgeAdapter(p.router, p.bridgeFactory, p.gateway, p.coreSettler);
+        ElysiumBridgeAdapter adapter = new ElysiumBridgeAdapter(p.router, p.bridgeFactory, p.gateway, p.coreSettler, p.treasury);
         Settlement settlement = new Settlement(p.deployer, p.treasury, p.keeper, address(adapter), p.rescueDelay);
         CorePadFactory factory = new CorePadFactory(
             address(settlement),

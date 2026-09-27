@@ -26,6 +26,12 @@ interface ISettlementOpen {
 ///         Fee: 1 % of the HYPE leg of every buy and sell, pushed to the immutable `treasury` in the
 ///         same transaction. The buy that crosses 800 M is clipped and its excess HYPE refunded.
 ///         At 800 M sold the pool freezes (no buy, no sell) and anyone can call `graduate()`.
+///
+///         Abort -> reopen: if the settlement ticket is never dispatched, anyone can `abort` it on
+///         Settlement after `rescueDelay`. Settlement hands the HYPE and book tokens back and calls
+///         `reopen()`: the curve resumes exactly where it stopped (virtual reserves were never touched,
+///         realHype is restored to virtualHype - virtualHype0), holders can sell back, and a later
+///         crossing buy freezes it again for a new graduation. Nothing goes to the treasury.
 /// @dev Invariants (see test/invariant): address(this).balance == realHype (absent forced ETH);
 ///      realHype == virtualHype - virtualHype0; virtualHype * virtualToken never decreases.
 contract LaunchPool is ReentrancyGuardTransient {
@@ -61,10 +67,17 @@ contract LaunchPool is ReentrancyGuardTransient {
     uint256 public realHype;
     uint256 public tokensSold;
     bool public graduated;
+    /// @notice Set by the buy that reaches 800 M sold; cleared only by `reopen()` after an abort.
+    ///         While set: no buy, no sell, `graduate()` allowed.
+    bool public frozen;
     bool public creatorBought;
+    /// @notice Latest settlement ticket of this pool (kept after an abort so its outcome stays readable).
     uint256 public ticketId;
-    /// @notice Cumulative tokens bought per address during the launch guard window.
+    /// @notice Cumulative tokens bought per address (msg.sender) during the launch guard window.
     mapping(address => uint256) public guardBought;
+    /// @notice Cumulative tokens bought per transaction origin during the launch guard window: one EOA
+    ///         cannot fan out through freshly deployed contracts inside a single transaction (L-1).
+    mapping(address => uint256) public guardBoughtByOrigin;
 
     // ---------------------------------------------------------------- events
     /// @param hypeAmount buy: HYPE paid by the trader (gross, after refund). sell: HYPE received (net).
@@ -80,6 +93,10 @@ contract LaunchPool is ReentrancyGuardTransient {
         uint256 virtualToken
     );
     event Frozen(address indexed pool, uint256 realHype, uint256 listPrice);
+    /// @notice Settlement aborted `ticket` and handed its assets back: trading resumes on the curve.
+    event Reopened(address indexed pool, uint256 indexed ticket, uint256 realHype, uint256 tokens);
+    /// @notice Unaccounted surplus (forced HYPE, donated tokens) pushed to the treasury.
+    event Swept(address indexed token, uint256 amount);
 
     // ---------------------------------------------------------------- errors
     error OnlyFactory();
@@ -93,6 +110,9 @@ contract LaunchPool is ReentrancyGuardTransient {
     error GuardExceeded(uint256 allowed);
     error CreatorBuyDone();
     error SellExceedsSold();
+    error OnlySettlement();
+    error NotGraduated();
+    error ReopenShortfall();
 
     constructor(
         uint256 launchId_,
@@ -130,10 +150,15 @@ contract LaunchPool is ReentrancyGuardTransient {
         if (block.timestamp > deadline) revert Expired();
         tokensOut = _buy(msg.sender, msg.value, SALE_SUPPLY - tokensSold, minTokensOut);
         if (block.timestamp < launchedAt + guardSeconds) {
-            // Launch guard: cumulative per address over the window (a per-call cap is no cap).
+            // Launch guard: cumulative per address over the window (a per-call cap is no cap), keyed
+            // on both the caller and the transaction origin.
+            uint256 max = guardMaxPerAddress;
             uint256 used = guardBought[msg.sender] + tokensOut;
-            if (used > guardMaxPerAddress) revert GuardExceeded(guardMaxPerAddress);
+            if (used > max) revert GuardExceeded(max);
             guardBought[msg.sender] = used;
+            uint256 usedOrigin = guardBoughtByOrigin[tx.origin] + tokensOut;
+            if (usedOrigin > max) revert GuardExceeded(max);
+            guardBoughtByOrigin[tx.origin] = usedOrigin;
         }
     }
 
@@ -151,6 +176,7 @@ contract LaunchPool is ReentrancyGuardTransient {
         if (cap > CREATOR_MAX) cap = CREATOR_MAX;
         tokensOut = _buy(buyer, msg.value, cap, minTokensOut);
         guardBought[buyer] += tokensOut;
+        guardBoughtByOrigin[tx.origin] += tokensOut;
     }
 
     /// @notice Sell `tokensIn` back to the curve. Requires prior approval of this pool.
@@ -160,7 +186,7 @@ contract LaunchPool is ReentrancyGuardTransient {
         returns (uint256 hypeOut)
     {
         if (block.timestamp > deadline) revert Expired();
-        if (tokensSold == SALE_SUPPLY || graduated) revert PoolFrozen();
+        if (frozen || graduated) revert PoolFrozen();
         if (tokensIn == 0) revert ZeroAmount();
         if (tokensIn > tokensSold) revert SellExceedsSold();
 
@@ -190,7 +216,7 @@ contract LaunchPool is ReentrancyGuardTransient {
     ///         any dust to Settlement, which opens a ticket.
     function graduate() external nonReentrant returns (uint256 id) {
         if (graduated) revert AlreadyGraduated();
-        if (tokensSold != SALE_SUPPLY) revert NotFrozen();
+        if (!frozen) revert NotFrozen();
         graduated = true;
 
         uint256 hype = address(this).balance; // realHype + any forced dust
@@ -203,6 +229,39 @@ contract LaunchPool is ReentrancyGuardTransient {
         ticketId = id;
     }
 
+    /// @notice Settlement-only, from `Settlement.abort`: the ticket's HYPE (msg.value) and tokens (sent
+    ///         just before) are back. Un-freezes the curve where it stopped. Virtual reserves and
+    ///         `tokensSold` were never touched by graduation, so the curve state is consistent and
+    ///         `realHype` is restored to `virtualHype - virtualHype0`. Holders can sell immediately;
+    ///         buys resume once something is sold back, and the next crossing buy freezes it again.
+    function reopen() external payable nonReentrant {
+        if (msg.sender != settlement) revert OnlySettlement();
+        if (!graduated) revert NotGraduated();
+        uint256 r = virtualHype - virtualHype0;
+        // Settlement returns what graduation took (realHype + any dust), never less.
+        if (msg.value < r || token.balanceOf(address(this)) < TOTAL_SUPPLY - tokensSold) revert ReopenShortfall();
+        graduated = false;
+        frozen = false;
+        realHype = r;
+        emit Reopened(address(this), ticketId, r, token.balanceOf(address(this)));
+    }
+
+    /// @notice Permissionless. After graduation the pool accounts for nothing, so anything it holds
+    ///         (HYPE forced in, tokens sent by mistake) is surplus and goes to the immutable treasury.
+    ///         `token == address(0)` sweeps HYPE. Before graduation every balance is accounted
+    ///         (graduate() moves dust into the ticket), so this reverts.
+    function sweep(address token_) external nonReentrant returns (uint256 amount) {
+        if (!graduated) revert NotGraduated();
+        if (token_ == address(0)) {
+            amount = address(this).balance;
+            if (amount != 0) treasury.forceSafeTransferETH(amount);
+        } else {
+            amount = token_.balanceOf(address(this));
+            if (amount != 0) token_.safeTransfer(treasury, amount);
+        }
+        emit Swept(token_, amount);
+    }
+
     // ================================================================ views
 
     /// @notice Marginal price, HYPE-wei per 1e18 token-wei (i.e. HYPE per token, 18 decimals).
@@ -210,30 +269,29 @@ contract LaunchPool is ReentrancyGuardTransient {
         return virtualHype * 1e18 / virtualToken;
     }
 
-    function frozen() public view returns (bool) {
-        return tokensSold == SALE_SUPPLY;
-    }
-
     function guardActive() public view returns (bool) {
         return block.timestamp < launchedAt + guardSeconds;
     }
 
-    /// @notice Tokens `account` may still buy while the guard is active (type(uint256).max after).
+    /// @notice Tokens `account` may still buy while the guard is active (type(uint256).max after),
+    ///         for an EOA buying directly (msg.sender == tx.origin == account).
     function guardRemaining(address account) external view returns (uint256) {
         if (!guardActive()) return type(uint256).max;
         uint256 used = guardBought[account];
+        uint256 usedOrigin = guardBoughtByOrigin[account];
+        if (usedOrigin > used) used = usedOrigin;
         return used >= guardMaxPerAddress ? 0 : guardMaxPerAddress - used;
     }
 
     /// @notice Quote a buy of `hypeIn` gross HYPE.
     function quoteBuy(uint256 hypeIn) external view returns (uint256 tokensOut, uint256 fee, uint256 refund) {
-        if (frozen()) return (0, 0, hypeIn);
+        if (frozen || graduated) return (0, 0, hypeIn);
         (tokensOut,,, fee, refund) = _quoteBuy(hypeIn, SALE_SUPPLY - tokensSold);
     }
 
     /// @notice Quote a sell of `tokensIn`.
     function quoteSell(uint256 tokensIn) external view returns (uint256 hypeOut, uint256 fee) {
-        if (frozen() || tokensIn > tokensSold) return (0, 0);
+        if (frozen || graduated || tokensIn > tokensSold) return (0, 0);
         uint256 gross = virtualHype * tokensIn / (virtualToken + tokensIn);
         fee = gross * FEE_BPS / BPS;
         hypeOut = gross - fee;
@@ -241,7 +299,7 @@ contract LaunchPool is ReentrancyGuardTransient {
 
     /// @notice HYPE (gross, fee included) still needed to reach graduation.
     function hypeToGraduate() external view returns (uint256) {
-        if (frozen()) return 0;
+        if (frozen || graduated) return 0;
         uint256 remaining = SALE_SUPPLY - tokensSold;
         uint256 net = _netNeeded(remaining);
         return _grossForNet(net);
@@ -253,7 +311,7 @@ contract LaunchPool is ReentrancyGuardTransient {
         internal
         returns (uint256 tokensOut)
     {
-        if (graduated || tokensSold == SALE_SUPPLY) revert PoolFrozen();
+        if (graduated || frozen) revert PoolFrozen();
         if (hypeIn == 0) revert ZeroAmount();
 
         uint256 net;
@@ -274,7 +332,10 @@ contract LaunchPool is ReentrancyGuardTransient {
         if (refund != 0) buyer.safeTransferETH(refund);
 
         emit Trade(address(this), buyer, true, gross, tokensOut, fee, virtualHype, virtualToken);
-        if (tokensSold == SALE_SUPPLY) emit Frozen(address(this), realHype, listPrice());
+        if (tokensSold == SALE_SUPPLY) {
+            frozen = true;
+            emit Frozen(address(this), realHype, listPrice());
+        }
     }
 
     /// @dev Returns tokens out, HYPE credited to the curve, gross HYPE kept, fee, refund.
