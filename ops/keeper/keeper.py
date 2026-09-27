@@ -50,7 +50,7 @@ import pathlib
 import sys
 import time
 import warnings
-from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 warnings.filterwarnings("ignore")
@@ -93,6 +93,7 @@ MIN_GAS_PRICE_BID = 10**8  # 0.1 gwei floor (docs); raised to 10x the live Elysi
 LADDER_LEVELS = int(os.environ.get("LADDER_LEVELS", "10"))
 LADDER_STEP_BPS = int(os.environ.get("LADDER_STEP_BPS", "50"))  # 0.5 % between levels
 SWAP_SLIPPAGE_BPS = int(os.environ.get("SWAP_SLIPPAGE_BPS", "200"))
+MIN_ORDER_NOTIONAL_USDC = Decimal(os.environ.get("MIN_ORDER_NOTIONAL_USDC", "10"))  # Core minimum order value
 HYPE_GAS_RESERVE = Decimal(os.environ.get("HYPE_GAS_RESERVE", "0.05"))  # kept on HyperEVM for gas
 
 VERIFIED = {
@@ -290,28 +291,126 @@ def round_px(px: Decimal, sz_decimals: int = SZ_DECIMALS) -> Decimal:
     return px.quantize(q, rounding=ROUND_HALF_EVEN)
 
 
-def ladder(mid: Decimal, book_tokens: Decimal, usdc: Decimal, levels: int, step_bps: int) -> Tuple[List[dict], List[str]]:
-    """Symmetric ladder: `levels` asks above and `levels` bids below `mid`, equal size per level.
-    Asks spend the book tokens, bids spend the USDC. Returns orders and warnings (tick collisions)."""
-    warns: List[str] = []
-    tick = Decimal(1).scaleb(-(SPOT_MAX_DECIMALS - SZ_DECIMALS))
-    if mid * Decimal(step_bps) / Decimal(10_000) < tick:
-        warns.append(f"step {step_bps} bps at px {mid} is below the Core tick {tick}: levels collapse onto ticks")
-    orders: List[dict] = []
-    ask_sz = (book_tokens / levels).quantize(Decimal(1).scaleb(-SZ_DECIMALS), rounding=ROUND_DOWN)
-    seen = set()
+def px_tick(px: Decimal, sz_decimals: int = SZ_DECIMALS) -> Decimal:
+    """Price increment allowed at `px` on HyperCore spot: 5 significant figures, at most
+    8 - szDecimals decimals; integer prices are always allowed."""
+    max_dec = SPOT_MAX_DECIMALS - sz_decimals
+    if px >= Decimal(10) ** 5:
+        return Decimal(1)
+    sig_tick = Decimal(1).scaleb(px.adjusted() - 4)
+    dec_tick = Decimal(1).scaleb(-max_dec)
+    return max(sig_tick, dec_tick)
+
+
+def is_valid_px(px: Decimal, sz_decimals: int = SZ_DECIMALS) -> bool:
+    if px <= 0:
+        return False
+    return px % px_tick(px, sz_decimals) == 0
+
+
+def px_above(target: Decimal, floor_excl: Decimal, sz_decimals: int = SZ_DECIMALS) -> Decimal:
+    """Smallest valid price >= target that is STRICTLY above `floor_excl`."""
+    p = max(target, floor_excl)
+    t = px_tick(p, sz_decimals)
+    q = (p / t).to_integral_value(rounding=ROUND_CEILING) * t
+    while q <= floor_excl or not is_valid_px(q, sz_decimals):
+        q += px_tick(q, sz_decimals)
+    return q.normalize()
+
+
+def px_below(target: Decimal, ceil_excl: Decimal, sz_decimals: int = SZ_DECIMALS) -> Optional[Decimal]:
+    """Largest valid price <= target that is STRICTLY below `ceil_excl` (None if none > 0)."""
+    p = min(target, ceil_excl)
+    t = px_tick(p, sz_decimals)
+    q = (p / t).to_integral_value(rounding=ROUND_FLOOR) * t
+    while q >= ceil_excl or (q > 0 and not is_valid_px(q, sz_decimals)):
+        q -= px_tick(q if q > 0 else p, sz_decimals)
+    return q.normalize() if q > 0 else None
+
+
+def _split(total: Decimal, weights: List[int], quantum: Decimal) -> List[Decimal]:
+    """Split `total` by `weights`, each part rounded DOWN to `quantum`; the rounding remainder goes to
+    the first part so the parts sum to `total` rounded down to `quantum` (nothing idle beyond dust)."""
+    wsum = sum(weights)
+    parts = [(total * w / wsum).quantize(quantum, rounding=ROUND_DOWN) for w in weights]
+    parts[0] += (total.quantize(quantum, rounding=ROUND_DOWN) - sum(parts))
+    return parts
+
+
+def ladder(mid: Decimal, book_tokens: Decimal, usdc: Decimal, levels: int, step_bps: int,
+           sz_decimals: int = SZ_DECIMALS, min_notional: Decimal = Decimal(0)) -> Tuple[List[dict], List[str]]:
+    """Ladder around `mid` on TOKEN/USDC, valid under HyperCore tick/sig-fig rules:
+      - every ask is STRICTLY above mid (rounded up), every bid STRICTLY below mid (rounded down), so the
+        book never crosses and never trades against itself;
+      - when price precision collapses several target levels onto the same tick, the levels MERGE: their
+        sizes are added to the remaining distinct level, so 100 % of the book tokens (asks) and of the
+        USDC (bids) is placed, up to one size quantum of dust;
+      - levels below `min_notional` USDC are merged inward (Core rejects orders under $10).
+    Returns (orders, notes)."""
+    notes: List[str] = []
+    quantum = Decimal(1).scaleb(-sz_decimals)
+    asks: Dict[Decimal, int] = {}
+    bids: Dict[Decimal, int] = {}
     for i in range(1, levels + 1):
         f = Decimal(step_bps * i) / Decimal(10_000)
-        ask = round_px(mid * (1 + f))
-        bid = round_px(mid * (1 - f))
-        if ask in seen or bid in seen or bid <= 0:
-            warns.append(f"level {i} collides after rounding (ask {ask}, bid {bid}); skipped")
-            continue
-        seen.update({ask, bid})
-        bid_sz = (usdc / levels / bid).quantize(Decimal(1).scaleb(-SZ_DECIMALS), rounding=ROUND_DOWN)
-        orders.append({"is_buy": False, "px": str(ask), "sz": str(ask_sz)})
-        orders.append({"is_buy": True, "px": str(bid), "sz": str(bid_sz)})
-    return orders, warns
+        # nearest valid tick to the target, clamped strictly to its side of mid
+        a = px_above(round_px(mid * (1 + f), sz_decimals), mid, sz_decimals)
+        asks[a] = asks.get(a, 0) + 1
+        b = px_below(round_px(mid * (1 - f), sz_decimals), mid, sz_decimals)
+        if b is not None:
+            bids[b] = bids.get(b, 0) + 1
+    if len(asks) < levels:
+        notes.append(f"tick at px {mid} is {px_tick(mid, sz_decimals)} (> {step_bps} bps steps): "
+                     f"{levels} ask levels merged into {len(asks)} distinct prices, sizes merged")
+    if len(bids) < levels:
+        notes.append(f"{levels} bid levels merged into {len(bids)} distinct prices, sizes merged")
+
+    def merge_small(levels_map: Dict[Decimal, int], notional_of) -> List[Tuple[Decimal, int]]:
+        lv = sorted(levels_map.items(), key=lambda kv: abs(kv[0] - mid))  # inner first
+        while len(lv) > 1 and min_notional > 0 and any(notional_of(px, w, lv) < min_notional for px, w in lv):
+            # fold the outermost level into its inner neighbour
+            px, w = lv.pop()
+            ipx, iw = lv[-1]
+            lv[-1] = (ipx, iw + w)
+            notes.append(f"level {px} folded into {ipx}: below the {min_notional} USDC minimum order")
+        return lv
+
+    orders: List[dict] = []
+    ask_lv = merge_small(asks, lambda px, w, lv: book_tokens * w / sum(x[1] for x in lv) * px)
+    ask_sz = _split(book_tokens, [w for _, w in ask_lv], quantum)
+    for (px, _), sz in zip(ask_lv, ask_sz):
+        if sz > 0:
+            orders.append({"is_buy": False, "px": str(px), "sz": str(sz)})
+    bid_lv = merge_small(bids, lambda px, w, lv: usdc * w / sum(x[1] for x in lv))
+    if bid_lv:
+        usdc_parts = _split(usdc, [w for _, w in bid_lv], Decimal("0.000001"))
+        for (px, _), u in zip(bid_lv, usdc_parts):
+            sz = (u / px).quantize(quantum, rounding=ROUND_DOWN)
+            if sz > 0:
+                orders.append({"is_buy": True, "px": str(px), "sz": str(sz)})
+    else:
+        notes.append("no valid bid price strictly below mid: USDC stays unplaced")
+    placed_tokens = sum(Decimal(o["sz"]) for o in orders if not o["is_buy"])
+    placed_usdc = sum(Decimal(o["sz"]) * Decimal(o["px"]) for o in orders if o["is_buy"])
+    notes.append(f"placed {placed_tokens}/{book_tokens} tokens on {len(ask_lv)} ask levels, "
+                 f"{placed_usdc:.6f}/{usdc} USDC on {len(bid_lv)} bid levels")
+    return orders, notes
+
+
+def token_index_from_response(res: Any) -> Optional[int]:
+    """Token index from a registerToken2 exchange response. Shapes seen in the SDK/docs:
+    {"status":"ok","response":{"type":"...","data":<int>}} or data={"token":<int>}. Anything else -> None."""
+    if not isinstance(res, dict) or res.get("status") != "ok":
+        return None
+    data = (res.get("response") or {}).get("data")
+    if isinstance(data, int) and not isinstance(data, bool):
+        return data
+    if isinstance(data, dict):
+        for k in ("token", "tokenIndex", "index"):
+            v = data.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                return v
+    return None
 
 
 # ------------------------------------------------------------------------------------------ keeper
@@ -321,7 +420,7 @@ CONFIRMED_SIG = "Confirmed(uint256,uint64,uint64)"
 L2TOL1_SIG = "L2ToL1Tx(address,address,uint256,uint256,uint256,uint256,uint256,uint256,bytes)"
 SEND_ROOT_SIG = "SendRootUpdated(bytes32,bytes32)"
 TICKET_T = "(uint256,address,address,uint256,uint256,uint256,uint256,uint64,uint64,uint8,address,uint64,uint64)"
-STATES = ["None", "Open", "Dispatched", "Confirmed", "Rescued"]
+STATES = ["None", "Open", "Dispatched", "Confirmed", "Aborted"]
 
 
 class Keeper:
@@ -364,6 +463,13 @@ class Keeper:
         d["id"] = tid
         return d
 
+    def rescue_delay(self) -> int:
+        try:
+            (d,) = self.ely.view(self.settlement, "rescueDelay()", [], [], ["uint256"])
+            return int(d)
+        except Exception:  # noqa: BLE001 - synthetic mode / no code
+            return int(self.dep.get("rescueDelay", 0))
+
     def token_meta(self, token: str) -> Tuple[str, str, int]:
         (n,) = self.ely.view(token, "name()", [], [], ["string"])
         (s,) = self.ely.view(token, "symbol()", [], [], ["string"])
@@ -382,11 +488,39 @@ class Keeper:
         mids = self.core.info({"type": "allMids"})
         return Decimal(mids[pair_name])
 
-    def hype_usdc_pair(self) -> Tuple[str, int]:
-        meta = self.core.info({"type": "spotMeta"})
+    def spot_meta(self) -> dict:
+        return self.core.info({"type": "spotMeta"})
+
+    def usdc_index(self, meta: Optional[dict] = None) -> int:
+        meta = meta or self.spot_meta()
+        usdc = [t for t in meta["tokens"] if t["name"] == "USDC"]
+        if len(usdc) != 1:
+            raise RuntimeError(f"spotMeta: expected exactly one USDC token, found {len(usdc)}")
+        return int(usdc[0]["index"])
+
+    def hype_usdc_pair(self) -> Tuple[str, int, int]:
+        meta = self.spot_meta()
         hype = next(t for t in meta["tokens"] if t["name"] == "HYPE")
-        pair = next(u for u in meta["universe"] if u["tokens"] == [hype["index"], 0])
+        usdc = self.usdc_index(meta)
+        pair = next(u for u in meta["universe"] if u["tokens"] == [hype["index"], usdc])
         return pair["name"], hype["index"], pair["index"]
+
+    def ticker_status(self, symbol: str) -> Tuple[bool, Optional[dict]]:
+        """(free, holder). HyperCore spot token names are unique: `symbol` is free when no token in
+        spotMeta carries that name (case-insensitive, Core compares tickers case-insensitively)."""
+        meta = self.spot_meta()
+        taken = [t for t in meta["tokens"] if str(t.get("name", "")).upper() == symbol.upper()]
+        return (not taken), (taken[0] if taken else None)
+
+    def report_ticker(self, symbol: str) -> bool:
+        free, holder = self.ticker_status(symbol)
+        if free:
+            log(f"    ticker {symbol}: FREE on HyperCore ({'mainnet' if self.core_url == API_MAINNET else 'testnet'} spotMeta)")
+        else:
+            log(f"    TICKER TAKEN: {symbol} already exists on HyperCore as token index {holder.get('index')} "
+                f"(fullName {holder.get('fullName')!r}, tokenId {holder.get('tokenId')}). This launch cannot be listed "
+                "under its symbol.")
+        return free
 
     # ---------------------------------------------------------------- steps
     def state_path(self, tid: int) -> pathlib.Path:
@@ -416,9 +550,19 @@ class Keeper:
         log(f"    hype={Decimal(t['hype']) / 10**18} HYPE  tokens={Decimal(t['tokens']) / 10**18}  "
             f"tickerBudget={Decimal(t['tickerBudget']) / 10**18} HYPE  listPrice={Decimal(t['listPrice']) / 10**18} HYPE/token")
 
-        if t["state"] in ("Confirmed", "Rescued"):
-            log("    nothing to do")
+        if t["state"] in ("Confirmed", "Aborted"):
+            log(f"    {t['state']}: nothing to do" + (" (assets returned to the pool, trading reopened)" if t["state"] == "Aborted" else ""))
             return
+
+        # 0. ticker availability on HyperCore, before anything leaves Elysium
+        if t["state"] == "Open" and not st.get("tokenIndex"):
+            log("\n-- step check_ticker   [read: HyperCore spotMeta]")
+            if not self.report_ticker(symbol):
+                at = int(t.get("createdAt", 0)) + int(self.rescue_delay())
+                log(f"    NOT dispatching ticket {tid}: the assets stay on Elysium. Anyone can call "
+                    f"Settlement.abort({tid}) from {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(at))} "
+                    "(rescueDelay after graduation) to return them to the pool and reopen trading.")
+                return
 
         # 1. mirror on HyperEVM
         if self.step("register_mirror", st):
@@ -545,21 +689,38 @@ class Keeper:
                     "from its own funds; it waits for the Dutch auction to fall under the budget.")
                 if self.execute:
                     return
+            # the ticker may have been squatted since graduation: never bid for a taken name
+            if not self.report_ticker(symbol):
+                log("    BLOCKED: ticker taken on HyperCore after dispatch. The assets are in coreSettler custody "
+                    "on HyperEVM (see docs/AUDIT.md M-3); operator action required.")
+                if self.execute:
+                    return
             action = {"type": "spotDeploy", "registerToken2": {
                 "spec": {"name": symbol, "szDecimals": SZ_DECIMALS, "weiDecimals": WEI_DECIMALS},
                 "maxGas": int(budget * 10**8), "fullName": name}}
-            self.core.sdk("registerToken2", action, "spot_deploy_register_token", symbol, SZ_DECIMALS, WEI_DECIMALS,
-                          int(budget * 10**8), name)
+            res = self.core.sdk("registerToken2", action, "spot_deploy_register_token", symbol, SZ_DECIMALS, WEI_DECIMALS,
+                                int(budget * 10**8), name)
+            if self.execute:
+                idx = token_index_from_response(res)
+                if idx is None:
+                    log(f"    BLOCKED: the registerToken2 response carries no token index: {res!r}. Re-run with "
+                        "--token-index N once the index is known; it is accepted only if spotDeployState shows the "
+                        "keeper deployed token N.")
+                    st["done"].append("register_token")
+                    self.save_state(tid, st)
+                    return
+                st["tokenIndex"] = idx
             st["done"].append("register_token")
             self.save_state(tid, st)
 
         token_index = st.get("tokenIndex")
-        if token_index is None and self.execute:
-            ds = self.core.info({"type": "spotDeployState", "user": self.keeper})
-            mine = [s for s in ds["states"] if s.get("spec", {}).get("name") == symbol]
-            token_index = mine[0]["token"] if mine else None
+        if token_index is None and self.args.token_index is not None and self.execute:
+            token_index = self.verified_token_index(self.args.token_index)
             st["tokenIndex"] = token_index
             self.save_state(tid, st)
+        if token_index is None and self.execute:
+            log("    BLOCKED: HyperCore token index unknown (never looked up by symbol). Nothing further is signed.")
+            return
         ti = token_index if token_index is not None else "<TOKEN_INDEX>"
         system_addr = ("0x20" + int(token_index).to_bytes(19, "big").hex()) if token_index is not None else "<0x20||tokenIndex>"
 
@@ -612,10 +773,15 @@ class Keeper:
         list_px_usdc = Decimal(t["listPrice"]) / 10**18 * hype_usdc
         start_px = round_px(list_px_usdc)
         if self.step("register_spot", st):
-            self.core.sdk("registerSpot", {"type": "spotDeploy", "registerSpot": {"tokens": [ti, 0]}},
-                          "spot_deploy_register_spot", token_index, 0)
+            usdc = self.usdc_index()
+            self.core.sdk("registerSpot", {"type": "spotDeploy", "registerSpot": {"tokens": [ti, usdc]}},
+                          "spot_deploy_register_spot", token_index, usdc)
             if self.execute:
-                st["spotIndex"] = self.find_spot_index(token_index)
+                spot = self.find_spot_index(token_index)
+                if spot is None:
+                    log(f"    BLOCKED: no TOKEN/USDC spot pair found for token index {token_index}; not continuing.")
+                    return
+                st["spotIndex"] = spot
             st["done"].append("register_spot")
             self.save_state(tid, st)
         spot_index = st.get("spotIndex", "<SPOT_INDEX>")
@@ -657,9 +823,10 @@ class Keeper:
 
         # 13. symmetric ladder around listPrice
         if self.step("ladder", st):
-            orders, warns = ladder(list_px_usdc, Decimal(dep_amount) / 10**18, usdc_est, LADDER_LEVELS, LADDER_STEP_BPS)
-            for w in warns:
-                log(f"    WARNING: {w}")
+            orders, notes = ladder(list_px_usdc, Decimal(dep_amount) / 10**18, usdc_est, LADDER_LEVELS, LADDER_STEP_BPS,
+                                   SZ_DECIMALS, MIN_ORDER_NOTIONAL_USDC)
+            for w in notes:
+                log(f"    ladder: {w}")
             log(f"    listPrice {Decimal(t['listPrice']) / 10**18} HYPE x HYPE/USDC {hype_usdc} = {list_px_usdc:.12f} USDC "
                 f"(Core start px {start_px})")
             coin = f"@{spot_index}"
@@ -672,11 +839,15 @@ class Keeper:
             st["done"].append("ladder")
             self.save_state(tid, st)
 
-        # 14. confirm on Elysium
+        # 14. confirm on Elysium: only with BOTH indexes known (never a fallback 0)
         if self.step("confirm", st):
+            if not isinstance(token_index, int) or not isinstance(spot_index, int):
+                log(f"    REFUSED: confirm needs a known coreTokenIndex and spotPairIndex "
+                    f"(have {token_index!r}, {spot_index!r}); nothing is sent.")
+                return
             self.ely_tx.send("Settlement.confirm", self.settlement,
                              calldata("confirm(uint256,uint64,uint64)", ["uint256", "uint64", "uint64"],
-                                      [tid, token_index or 0, spot_index if isinstance(spot_index, int) else 0]))
+                                      [tid, token_index, spot_index]))
             st["done"].append("confirm")
             self.save_state(tid, st)
 
@@ -688,17 +859,32 @@ class Keeper:
         return Decimal(0)
 
     def find_spot_index(self, token_index: int) -> Optional[int]:
-        """UNVERIFIED: the docs say the allocated pair index appears in spotDeployState; fall back to
-        spotMeta.universe once listed."""
-        meta = self.core.info({"type": "spotMeta"})
-        for u in meta["universe"]:
-            if u["tokens"] == [token_index, 0]:
-                return u["index"]
+        """The TOKEN/USDC pair of THIS token: spotMeta.universe filtered on tokens == [token_index, USDC].
+        Fallback (UNVERIFIED shape): the keeper's spotDeployState entry for this exact token index."""
+        meta = self.spot_meta()
+        usdc = self.usdc_index(meta)
+        pairs = [u for u in meta["universe"] if u.get("tokens") == [token_index, usdc]]
+        if len(pairs) == 1:
+            return int(pairs[0]["index"])
+        if len(pairs) > 1:
+            raise RuntimeError(f"ambiguous: {len(pairs)} TOKEN/USDC pairs for token {token_index}")
         ds = self.core.info({"type": "spotDeployState", "user": self.keeper})
         for s in ds.get("states", []):
+            if s.get("token") != token_index:
+                continue
             for sp in s.get("spots", []) or []:
-                return sp if isinstance(sp, int) else sp.get("index")
+                idx = sp if isinstance(sp, int) else sp.get("index")
+                toks = None if isinstance(sp, int) else sp.get("tokens")
+                if idx is not None and (toks is None or toks == [token_index, usdc]):
+                    return int(idx)
         return None
+
+    def verified_token_index(self, idx: int) -> int:
+        """Accept an operator-supplied token index only if the keeper's spotDeployState owns it."""
+        ds = self.core.info({"type": "spotDeployState", "user": self.keeper})
+        if not any(s.get("token") == idx for s in ds.get("states", [])):
+            sys.exit(f"--token-index {idx}: not in the keeper's spotDeployState; refusing")
+        return idx
 
     # ---------------------------------------------------------------- entry points
     def synthetic_ticket(self) -> dict:
@@ -732,10 +918,15 @@ def main() -> None:
     ap.add_argument("--synthetic", action="store_true", help="print the full plan for a rehearsal-shaped ticket")
     ap.add_argument("--mainnet", action="store_true", help="HyperCore mainnet API (not supported in v0)")
     ap.add_argument("--loop", type=int, default=0, help="poll every N seconds")
+    ap.add_argument("--token-index", type=int, help="recovery: HyperCore token index if registerToken2 returned none "
+                    "(verified against the keeper's spotDeployState)")
+    ap.add_argument("--check-ticker", help="only report whether SYMBOL is free on HyperCore spot, then exit")
     args = ap.parse_args()
     if args.mainnet:
         sys.exit("mainnet is not live for Elysium; refusing")
     k = Keeper(args)
+    if args.check_ticker:
+        sys.exit(0 if k.report_ticker(args.check_ticker) else 3)
     while True:
         k.run()
         if not args.loop:
