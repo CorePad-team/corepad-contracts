@@ -5,3 +5,4 @@ broadcast/*/99801/dry-run/
 broadcast/*/31337/
 ops/keeper/state/
 __pycache__/
+.env.*
