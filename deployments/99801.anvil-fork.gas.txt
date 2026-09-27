@@ -1,9 +1,16 @@
-launch (+creator buy 0.001)        gas  2449895  tx 0xc0270c1100667e05d46689352958f55f500182fc71c2cb8edf568ffa75ffe0f0
-buy 0.002 (guard window)           gas   113616  tx 0x48184aca95eece604503d790e07a3528e0854ad41992e7b759d1555288c2571c
-buy 0.3                            gas    74167  tx 0x71095298eea8fa6ea6ec18a0a376556742c1a9feb523132cf01af77d91980c45
-approve pool                       gas    46112  tx 0x6368a4be40a8bd4cd032f489e55aaf73bcb49310418fcba0592bfc3f700fb690
-sell 1e24 tokens                   gas    85845  tx 0x4f767fe0d3f2acc49bb4ab7bf4d4750bd28f2d88d1f5a925c89a9aa544b8062a
-buy 3 (clipped, refunded)          gas    84776  tx 0xc902be757327eaff70a2d3329bf671aa24eb6c1f95db1103aa12d60d48c22b21
-graduate                           gas   354618  tx 0xd6f4cee15e13d480a69f3c22ec42ff419a48a8a98e240499c90fa1b0be7ed720
-dispatch                           gas   324443  tx 0xd710be028e9c4f5c09bfc8873185949a72d12852f70efd9befda66d54683ace3
-confirm                            gas    56315  tx 0x190684693e721df957fb178267ad3b46a02f5eacad2417bea54802a0b7c6a009
+launch (+creator buy 0.001)        gas  2745896  tx 0x22534b51f428e1bc0f4b1809ac045e7d7c8e37e7f2d900dc961a5da415ae4102
+buy 0.002 (guard window)           gas   135992  tx 0x32cb6c504b119f555a8f03f00e649264b1808d7358fe47624be30fee0daf615c
+buy 0.3                            gas    74171  tx 0x6e4d68c6adcd10189ce150b08b869ae73f95cb08896b0670034924779b99e9ad
+approve pool                       gas    46113  tx 0x952845c33217b83542ea55bf783c623cfa4ee1711c4786a675f66e8e70b18559
+sell 1e24 tokens                   gas    85862  tx 0x7f4a95bb9425357f76db78ef3c1e0577aaeaad3a543d4841f83de069ceef854d
+buy 3 (clipped, refunded)          gas    87792  tx 0x4d82f5da858f97b519bc1a0cf59dbac990134a31bba21dae94afda5fc8e1ba04
+graduate                           gas   374835  tx 0x90ea5ecfbab898ea2eddd6f37452dca9cfecc14ae38203224f17cac5da3c683e
+abort(1) after rescueDelay         gas   116373  tx 0x6753dbc12a9a1cbe53d92cbc2aba3b3553483d79490f7bd83ba5d414cbb10d82
+approve pool (trader)              gas    29013  tx 0x39c9d5a8b7237ea0c2189959fa8fbefc46e9d8c84a36686b03b6f7650efec36f
+sell all (trader)                  gas    76322  tx 0xb2af6405d89e6a3acc97c4d957f6d3dee979e4553bece858444318160e9d1eba
+approve pool (creator)             gas    46101  tx 0xbc1da100d8e45691bc3198f5a62ae1a6cf57b56b1163dbab72dd770f19eb5767
+sell all (creator)                 gas    69010  tx 0x5fac92eed05a9c9ce50c5c3169f5bf118f8de0d7cf8860f7737e308647834253
+buy 3 (clipped, re-freeze)         gas   121992  tx 0xf95a76eddf673fca7865e4f6bc3b1c8ffb21428359667335a92f8259e88ee05f
+graduate (2nd)                     gas   340635  tx 0x983a16e81912af9c6bdbc250daea1a29e85960b4c20ab247b7af22d9862ae29a
+dispatch(2)                        gas   325641  tx 0x1a7c86f4eb77cb93538a18cd1f76869e5fa034ae5026bbb45a6ace946e28ebed
+confirm(2)                         gas    56315  tx 0xfc7d6ad77071538ec7ac977a2011cb5f8a48d937688f983003b8306e29e427e6

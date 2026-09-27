@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end rehearsal on a LOCAL anvil fork of Elysium testnet:
-#   deploy -> launch (+creator buy) -> buys (guard window, then after) -> clipped final buy ->
-#   graduate -> mirror registration replayed -> dispatch (ArbSys mocked) -> confirm
+#   deploy -> launch (+creator buy, at cast's own gas estimate: the bridge wallet must exist) ->
+#   buys (guard window, then after) -> clipped final buy -> graduate ->
+#   ABORT PATH: wait rescueDelay -> abort (permissionless) -> every holder sells back -> re-buy to 800 M
+#   -> graduate again (ticket 2) -> mirror registration replayed -> dispatch (ArbSys mocked) -> confirm
 #
 # Every transaction goes to 127.0.0.1 only. The live RPC is used solely as --fork-url.
 # anvil has no ArbOS precompiles, so MockArbSys runtime code is set at 0x64 (anvil_setCode);
@@ -54,8 +56,13 @@ echo "== launch"
 VALUE=0.001ether send "launch (+creator buy 0.001)" "$PRIVATE_KEY" "$FACTORY" "launch(string,string,uint256)" "CorePad Rehearsal" "CPR" 0
 POOL=$(cast call "$FACTORY" "poolOf(uint256)(address)" 1 --rpc-url "$RPC")
 TOKEN=$(cast call "$FACTORY" "tokenOf(uint256)(address)" 1 --rpc-url "$RPC")
-WALLET=$(cast call 0xb94A38a4aC46970559E89E566f2486a3Fc56BE5a "l2WalletFor(address)(address)" "$TOKEN" --rpc-url "$RPC")
-echo "pool $POOL token $TOKEN bridge wallet $WALLET"
+BF=0xb94A38a4aC46970559E89E566f2486a3Fc56BE5a
+# The escrow wallet address is deterministic: predictL2Wallet. l2WalletFor is only non-zero once
+# createL2Wallet ran, which the launch must have done even at cast's exact gas estimate (QA bug 6).
+WALLET=$(cast call $BF "predictL2Wallet(address)(address)" "$TOKEN" --rpc-url "$RPC")
+CREATED=$(cast call $BF "l2WalletFor(address)(address)" "$TOKEN" --rpc-url "$RPC")
+echo "pool $POOL token $TOKEN bridge wallet $WALLET (created at launch: $CREATED)"
+[ "$(echo "$CREATED" | tr A-F a-f)" = "$(echo "$WALLET" | tr A-F a-f)" ] || { echo "BRIDGE WALLET NOT CREATED AT LAUNCH (silent skip)"; exit 1; }
 
 echo "== buys inside the 60 s guard"
 VALUE=0.002ether send "buy 0.002 (guard window)" "$TRADER_PK" "$POOL" "buy(uint256,uint256)" 0 $(( $(now) + 60 ))
@@ -84,9 +91,45 @@ echo "frozen=$(cast call "$POOL" "frozen()(bool)" --rpc-url "$RPC") realHype=$(c
 echo "== graduate (permissionless)"
 send "graduate" "$TRADER_PK" "$POOL" "graduate()"
 cast call "$SETTLEMENT" "getTicket(uint256)((uint256,address,address,uint256,uint256,uint256,uint256,uint64,uint64,uint8,address,uint64,uint64))" 1 --rpc-url "$RPC"
+num() { awk '{print $1}'; }
+RAISED1=$(cast call "$SETTLEMENT" "lockedHype()(uint256)" --rpc-url "$RPC" | num)
+
+echo "== ABORT PATH: abort before rescueDelay must revert"
+set +e; cast send "$SETTLEMENT" "abort(uint256)" 1 --private-key "$TRADER_PK" --rpc-url "$RPC" >/dev/null 2>&1; rc=$?; set -e
+[ $rc -ne 0 ] && echo "early abort reverted (TooEarly)" || { echo "EARLY ABORT SUCCEEDED"; exit 1; }
+DELAY=$(cast call "$SETTLEMENT" "rescueDelay()(uint256)" --rpc-url "$RPC" | num)
+cast rpc evm_increaseTime "$DELAY" --rpc-url "$RPC" >/dev/null; cast rpc evm_mine --rpc-url "$RPC" >/dev/null
+TR0=$(cast balance "$DEPLOYER" --rpc-url "$RPC")   # deployer == treasury on this deploy
+send "abort(1) after rescueDelay" "$TRADER_PK" "$SETTLEMENT" "abort(uint256)" 1
+TR1=$(cast balance "$DEPLOYER" --rpc-url "$RPC")
+[ "$TR0" = "$TR1" ] || { echo "TREASURY RECEIVED FUNDS FROM AN ABORT"; exit 1; }
+ST1=$(cast call "$SETTLEMENT" "stateOf(uint256)(uint8)" 1 --rpc-url "$RPC")
+PB=$(cast balance "$POOL" --rpc-url "$RPC"); RH=$(cast call "$POOL" "realHype()(uint256)" --rpc-url "$RPC" | num)
+echo "ticket 1 state $ST1 (4 = Aborted); pool balance $PB realHype $RH graduated=$(cast call "$POOL" "graduated()(bool)" --rpc-url "$RPC") frozen=$(cast call "$POOL" "frozen()(bool)" --rpc-url "$RPC")"
+[ "$ST1" = "4" ] && [ "$PB" = "$RH" ] && [ "$RH" = "$RAISED1" ] || { echo "ABORT DID NOT RESTORE THE POOL"; exit 1; }
+
+echo "== every holder sells back"
+for who in trader creator; do
+  if [ $who = trader ]; then PK_=$TRADER_PK; A_=$TRADER; else PK_=$PRIVATE_KEY; A_=$DEPLOYER; fi
+  HB=$(cast call "$TOKEN" "balanceOf(address)(uint256)" "$A_" --rpc-url "$RPC" | num)
+  [ "$HB" = "0" ] && continue
+  send "approve pool ($who)" "$PK_" "$TOKEN" "approve(address,uint256)" "$POOL" "$HB"
+  send "sell all ($who)" "$PK_" "$POOL" "sell(uint256,uint256,uint256)" "$HB" 0 $(( $(now) + 60 ))
+  PB=$(cast balance "$POOL" --rpc-url "$RPC"); RH=$(cast call "$POOL" "realHype()(uint256)" --rpc-url "$RPC" | num)
+  [ "$PB" = "$RH" ] || { echo "POOL HYPE != realHype after $who sold"; exit 1; }
+done
+echo "tokensSold $(cast call "$POOL" "tokensSold()(uint256)" --rpc-url "$RPC") pool balance $(cast balance "$POOL" --rpc-url "$RPC") == realHype $(cast call "$POOL" "realHype()(uint256)" --rpc-url "$RPC")"
+
+echo "== re-buy to 800 M and graduate again (ticket 2)"
+VALUE=3ether send "buy 3 (clipped, re-freeze)" "$TRADER_PK" "$POOL" "buy(uint256,uint256)" 0 $(( $(now) + 60 ))
+echo "frozen=$(cast call "$POOL" "frozen()(bool)" --rpc-url "$RPC") realHype=$(cast call "$POOL" "realHype()(uint256)" --rpc-url "$RPC")"
+send "graduate (2nd)" "$TRADER_PK" "$POOL" "graduate()"
+T2=$(cast call "$POOL" "ticketId()(uint256)" --rpc-url "$RPC" | num)
+[ "$T2" = "2" ] || { echo "EXPECTED TICKET 2, got $T2"; exit 1; }
+echo "ticket 2 open: state $(cast call "$SETTLEMENT" "stateOf(uint256)(uint8)" 2 --rpc-url "$RPC") (1 = Open)"
 
 echo "== dispatch before the mirror is registered must revert"
-set +e; cast send "$SETTLEMENT" "dispatch(uint256)" 1 --private-key "$TRADER_PK" --rpc-url "$RPC" >/dev/null 2>&1; rc=$?; set -e
+set +e; cast send "$SETTLEMENT" "dispatch(uint256)" 2 --private-key "$TRADER_PK" --rpc-url "$RPC" >/dev/null 2>&1; rc=$?; set -e
 [ $rc -ne 0 ] && echo "reverted (route not ready), ticket stays open" || { echo "UNEXPECTED dispatch success"; exit 1; }
 
 echo "== replay HyperEVM createAndRegisterL1Mirror delivery messages (aliased L1 counterparts)"
@@ -100,12 +143,14 @@ cast send 0x89659883a9d980925733B0A698F117AAb65ac718 "setGateway(address[],addre
 echo "route ready: $(cast call "$ADAPTER" "isRouteReady(address)(bool)" "$TOKEN" --rpc-url "$RPC")"
 
 echo "== dispatch (permissionless)"
-send "dispatch" "$TRADER_PK" "$SETTLEMENT" "dispatch(uint256)" 1
+send "dispatch(2)" "$TRADER_PK" "$SETTLEMENT" "dispatch(uint256)" 2
 echo "wallet escrow: $(cast call "$TOKEN" "balanceOf(address)(uint256)" "$WALLET" --rpc-url "$RPC")"
 echo "ArbSys(mock) withdrawnTo coreSettler: $(cast call 0x0000000000000000000000000000000000000064 "withdrawnTo(address)(uint256)" "$DEPLOYER" --rpc-url "$RPC")"
 echo "settlement balance: $(cast balance "$SETTLEMENT" --rpc-url "$RPC")"
 
 echo "== confirm (keeper = deployer on testnet)"
-send "confirm" "$PRIVATE_KEY" "$SETTLEMENT" "confirm(uint256,uint64,uint64)" 1 1234 77
-echo "ticket state: $(cast call "$SETTLEMENT" "stateOf(uint256)(uint8)" 1 --rpc-url "$RPC") (3 = Confirmed)"
+send "confirm(2)" "$PRIVATE_KEY" "$SETTLEMENT" "confirm(uint256,uint64,uint64)" 2 1234 77
+FINAL=$(cast call "$SETTLEMENT" "stateOf(uint256)(uint8)" 2 --rpc-url "$RPC")
+echo "ticket 2 state: $FINAL (3 = Confirmed); ticket 1 state: $(cast call "$SETTLEMENT" "stateOf(uint256)(uint8)" 1 --rpc-url "$RPC") (4 = Aborted)"
+[ "$FINAL" = "3" ] || { echo "NOT CONFIRMED"; exit 1; }
 echo "OK. gas log: $GAS_LOG"

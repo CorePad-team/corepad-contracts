@@ -5,7 +5,7 @@
   "bridgeFactory": "0xb94A38a4aC46970559E89E566f2486a3Fc56BE5a",
   "chainId": 31337,
   "coreSettler": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f",
-  "deployedAtBlock": 350102,
+  "deployedAtBlock": 374010,
   "deployer": "0xD9ecD1bbA64295dA8dd9684143204F3806EAE03f",
   "gateway": "0x7255150a0340852Fe4B4B5657C5AcE6c09a4F959",
   "graduationHype": "1500000000000000000",
