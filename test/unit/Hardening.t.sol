@@ -194,6 +194,17 @@ contract HardeningTest is Base {
         r2.buy{value: 0.003 ether}(pool);
     }
 
+    /// The msg.sender count still matters on its own: one relay shared by many origins is capped.
+    function test_guard_sharedRelayCappedAsMsgSender() public {
+        (LaunchPool pool,) = _launch();
+        Relay r = new Relay();
+        vm.prank(bob, bob);
+        r.buy{value: 0.003 ether}(pool);
+        vm.prank(carol, carol);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.GuardExceeded.selector, GUARD_MAX));
+        r.buy{value: 0.003 ether}(pool);
+    }
+
     function test_guard_creatorBuyCountsForOrigin() public {
         vm.prank(alice, alice);
         (,, address p) = factory.launch{value: 0.001 ether}("Core Test", "CORE", 0);
