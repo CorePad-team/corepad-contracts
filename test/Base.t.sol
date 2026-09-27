@@ -35,7 +35,7 @@ abstract contract Base is Test {
         bridge = new MockElysiumBridge();
         vm.etch(address(0x64), address(new MockArbSys()).code);
         arbSys = MockArbSys(address(0x64));
-        adapter = new ElysiumBridgeAdapter(address(bridge), address(bridge), address(bridge), coreSettler);
+        adapter = new ElysiumBridgeAdapter(address(bridge), address(bridge), address(bridge), coreSettler, treasury);
         settlement = new Settlement(owner, treasury, keeper, address(adapter), RESCUE_DELAY);
         factory = new CorePadFactory(address(settlement), treasury, address(bridge), G, TICKER, GUARD_S, GUARD_MAX);
         vm.prank(owner);
@@ -53,8 +53,17 @@ abstract contract Base is Test {
     }
 
     function _buy(LaunchPool pool, address who, uint256 value) internal returns (uint256) {
-        vm.prank(who);
+        vm.prank(who, who); // an EOA: msg.sender == tx.origin
         return pool.buy{value: value}(0, block.timestamp);
+    }
+
+    function _sellAll(LaunchPool pool, address who) internal returns (uint256 got) {
+        CorePadToken t = pool.token();
+        uint256 bal = t.balanceOf(who);
+        vm.startPrank(who, who);
+        t.approve(address(pool), bal);
+        got = pool.sell(bal, 0, block.timestamp);
+        vm.stopPrank();
     }
 
     /// @dev Skip the guard, then buy until frozen with a large final buy.

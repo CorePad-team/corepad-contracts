@@ -54,7 +54,7 @@ contract ElysiumForkTest is Test {
         assertEq(block.chainid, 99801);
         vm.etch(address(0x64), address(new MockArbSys()).code); // ArbOS precompile mock (see @dev)
 
-        adapter = new ElysiumBridgeAdapter(ROUTER, BRIDGE_FACTORY, GATEWAY, coreSettler);
+        adapter = new ElysiumBridgeAdapter(ROUTER, BRIDGE_FACTORY, GATEWAY, coreSettler, treasury);
         settlement = new Settlement(address(this), treasury, keeper, address(adapter), 7 days);
         factory = new CorePadFactory(address(settlement), treasury, BRIDGE_FACTORY, 1.5 ether, 0.5 ether, 60, 10_000_000e18);
         settlement.setFactory(address(factory));
@@ -83,6 +83,30 @@ contract ElysiumForkTest is Test {
         // Mirror not registered on HyperEVM yet: the router falls back to the default gateway.
         assertEq(IL2GatewayRouter(ROUTER).getGateway(mirror), IL2RouterAdmin(ROUTER).defaultGateway());
         assertFalse(adapter.isRouteReady(token));
+    }
+
+    /// QA bug 6 against the LIVE ElysiumBridgeFactory: the smallest gas limit at which `launch`
+    /// succeeds (what eth_estimateGas converges on) must create the bridge wallet, never skip it.
+    function test_fork_launchAtExactEstimateCreatesWallet() public {
+        _skipIfDisabled();
+        bytes memory data = abi.encodeCall(CorePadFactory.launch, ("Fork Estimate", "FEST", 0));
+        uint256 lo = 200_000;
+        uint256 hi = 10_000_000;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            uint256 snap = vm.snapshotState();
+            (bool ok,) = address(factory).call{gas: mid}(data);
+            vm.revertToState(snap);
+            if (ok) hi = mid;
+            else lo = mid + 1;
+        }
+        emit log_named_uint("launch minimal gas (live bridge factory)", lo);
+        (bool ok2,) = address(factory).call{gas: lo}(data);
+        assertTrue(ok2);
+        address token = factory.tokenOf(factory.launchCount());
+        IElysiumBridgeFactory bf = IElysiumBridgeFactory(BRIDGE_FACTORY);
+        assertTrue(bf.l2WalletFor(token) != address(0), "wallet created at the exact estimate");
+        assertEq(bf.l2WalletFor(token), bf.predictL2Wallet(token));
     }
 
     /// The real Router path with a token whose mirror is already registered on testnet.

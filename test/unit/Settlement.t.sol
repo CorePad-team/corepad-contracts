@@ -107,36 +107,60 @@ contract SettlementTest is Base {
         assertEq(t.spotPairIndex, 56);
     }
 
-    function test_rescue_treasuryOnlyAfterDelay() public {
-        vm.expectRevert(Settlement.OnlyTreasury.selector);
-        settlement.rescue(1);
-        vm.prank(treasury);
+    function test_abort_permissionlessAfterDelay_returnsEverythingToPool() public {
         vm.expectRevert(abi.encodeWithSelector(Settlement.TooEarly.selector, block.timestamp + RESCUE_DELAY));
-        settlement.rescue(1);
+        settlement.abort(1);
+        assertEq(settlement.abortableAt(1), block.timestamp + RESCUE_DELAY);
 
         vm.warp(block.timestamp + RESCUE_DELAY);
-        uint256 before = treasury.balance;
-        vm.prank(treasury);
-        settlement.rescue(1);
-        assertEq(treasury.balance - before, raised);
-        assertEq(token.balanceOf(treasury), 200_000_000e18);
+        uint256 t0 = treasury.balance;
+        vm.prank(carol); // anyone
+        settlement.abort(1);
+        assertEq(treasury.balance, t0, "treasury gets nothing from an abort");
+        assertEq(token.balanceOf(treasury), 0);
         assertEq(address(settlement).balance, 0);
-        assertEq(uint8(settlement.stateOf(1)), uint8(Settlement.State.Rescued));
+        assertEq(token.balanceOf(address(settlement)), 0);
+        assertEq(settlement.lockedHype(), 0);
+        assertEq(settlement.lockedTokens(address(token)), 0);
+        assertEq(address(pool).balance, raised, "HYPE back in the pool");
+        assertEq(pool.realHype(), raised);
+        assertEq(token.balanceOf(address(pool)), 200_000_000e18, "book tokens back in the pool");
+        assertFalse(pool.graduated());
+        assertFalse(pool.frozen());
+        assertEq(uint8(settlement.stateOf(1)), uint8(Settlement.State.Aborted));
+        assertEq(settlement.ticketOfLaunch(1), 0, "launch may graduate again");
+        assertEq(settlement.abortableAt(1), 0);
 
-        vm.prank(treasury);
-        vm.expectRevert(abi.encodeWithSelector(Settlement.BadState.selector, Settlement.State.Rescued));
-        settlement.rescue(1);
-        vm.expectRevert(abi.encodeWithSelector(Settlement.BadState.selector, Settlement.State.Rescued));
+        vm.expectRevert(abi.encodeWithSelector(Settlement.BadState.selector, Settlement.State.Aborted));
+        settlement.abort(1);
+        vm.expectRevert(abi.encodeWithSelector(Settlement.BadState.selector, Settlement.State.Aborted));
         settlement.dispatch(1);
     }
 
-    function test_rescue_notAfterDispatch() public {
+    function test_abort_notAfterDispatch() public {
         bridge.register(address(token));
         settlement.dispatch(1);
         vm.warp(block.timestamp + RESCUE_DELAY);
-        vm.prank(treasury);
         vm.expectRevert(abi.encodeWithSelector(Settlement.BadState.selector, Settlement.State.Dispatched));
-        settlement.rescue(1);
+        settlement.abort(1);
+    }
+
+    function test_reopen_onlySettlement() public {
+        vm.expectRevert(LaunchPool.OnlySettlement.selector);
+        pool.reopen();
+    }
+
+    function test_rescueDelay_bounded() public {
+        vm.expectRevert(Settlement.BadDelay.selector);
+        new Settlement(owner, treasury, keeper, address(adapter), 1 days - 1);
+        vm.expectRevert(Settlement.BadDelay.selector);
+        new Settlement(owner, treasury, keeper, address(adapter), 30 days + 1);
+        new Settlement(owner, treasury, keeper, address(adapter), 1 days);
+        new Settlement(owner, treasury, keeper, address(adapter), 30 days);
+    }
+
+    function test_coreSettlerView() public view {
+        assertEq(settlement.coreSettler(), coreSettler);
     }
 
     function test_adapter_isPermissionlessButOnlyPaysCoreSettler() public {
