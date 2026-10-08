@@ -1,3 +1,16 @@
+<p align="center">
+  <img src=".github/assets/header-contracts.png" alt="CorePad" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://corepad.app"><img src="https://img.shields.io/badge/app-corepad.app-B4E6D2?style=flat-square&labelColor=141B14" alt="corepad.app"></a>
+  <img src="https://img.shields.io/badge/live-Elysium%20testnet%2099801-B4E6D2?style=flat-square&labelColor=141B14" alt="Elysium testnet">
+  <img src="https://img.shields.io/badge/tests-75%20passing-B4E6D2?style=flat-square&labelColor=141B14" alt="75 tests">
+  <img src="https://img.shields.io/badge/mutants-34%2F34%20killed-B4E6D2?style=flat-square&labelColor=141B14" alt="34/34 mutants">
+  <img src="https://img.shields.io/badge/solidity-0.8.28-B4E6D2?style=flat-square&labelColor=141B14" alt="solc 0.8.28">
+  <a href="https://x.com/CorePad_hl"><img src="https://img.shields.io/badge/X-@CorePad__hl-B4E6D2?style=flat-square&labelColor=141B14" alt="X"></a>
+</p>
+
 # CorePad contracts
 
 > CorePad leverages Elysium to execute high-density launches, settling seamlessly into Hyperliquid Core.
@@ -5,6 +18,31 @@
 Launch contracts on Elysium (testnet 99801), the Elysium → HyperEVM settlement leg, and the keeper that
 lists a graduated launch on a HyperCore spot book. `SPEC.md` is the shared source of truth;
 `docs/BRIDGE_NOTES.md` records what the live bridge contracts actually do.
+
+<p align="center">
+  <img src=".github/assets/b-mechanism.png" alt="Absorb on Elysium, graduate at 800 M sold, settle on the HyperCore book" width="100%">
+</p>
+
+## Live on Elysium testnet
+
+| Contract | Address |
+|---|---|
+| CorePadFactory | [`0x8547e759715b1bbd67291e06395E0C5FfeA4de13`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x8547e759715b1bbd67291e06395E0C5FfeA4de13) |
+| Settlement | [`0x2cde65C326E61cD9619F4f4f08D20Eac0015559C`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x2cde65C326E61cD9619F4f4f08D20Eac0015559C) |
+| ElysiumBridgeAdapter | [`0x9BAA610A43B8f62F0d014aF4EEFB0dF44AF87e37`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x9BAA610A43B8f62F0d014aF4EEFB0dF44AF87e37) |
+
+Exercised live on testnet: launch, buy, sell, graduate, abort (curve reopened, holders sold back), mirror
+registration, dispatch through the bridge, and both Outbox claims on HyperEVM. The HIP-1 listing step is
+blocked on testnet (ticker auction far above the testnet budget, deposit-wallet factory not published).
+Details in [`docs/STATUS.md`](docs/STATUS.md).
+
+<p align="center">
+  <img src=".github/assets/app-pipeline.png" alt="Launch #2 pipeline on corepad.app: graduated, route ready, dispatched" width="100%">
+</p>
+
+<p align="center">
+  <img src=".github/assets/d-graduation.png" alt="The curve closes, the book opens at listPrice" width="100%">
+</p>
 
 ## Architecture
 
