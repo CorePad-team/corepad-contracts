@@ -156,15 +156,19 @@ class Rpc:
 
     def call(self, method: str, params: list) -> Any:
         self._id += 1
-        for attempt in range(4):
+        for attempt in range(8):
             try:
                 r = requests.post(self.url, json={"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}, timeout=30)
                 j = r.json()
                 if "error" in j:
+                    # public HyperEVM RPC answers -32005 "rate limited" under load: back off, never treat it as a result
+                    if "rate limit" in str(j["error"]).lower() and attempt < 7:
+                        time.sleep(2 * (attempt + 1))
+                        continue
                     raise RuntimeError(f"{self.name} {method}: {j['error']}")
                 return j["result"]
             except (requests.RequestException, ValueError):
-                if attempt == 3:
+                if attempt == 7:
                     raise
                 time.sleep(1 + attempt)
 
@@ -185,6 +189,18 @@ class Rpc:
             out += self.call("eth_getLogs", [{"address": address, "topics": topics, "fromBlock": hex(b), "toBlock": hex(e)}])
             b = e + 1
         return out
+
+    def logs_latest(self, address: str, topics: list, from_block: int, to_block: int, chunk: int) -> List[dict]:
+        """Scans backwards from to_block and returns the logs of the most recent chunk that has any."""
+        e = to_block
+        while e >= from_block:
+            b = max(from_block, e - chunk + 1)
+            found = self.call("eth_getLogs", [{"address": address, "topics": topics, "fromBlock": hex(b), "toBlock": hex(e)}])
+            if found:
+                return found
+            e = b - 1
+            time.sleep(0.5)  # the public HyperEVM RPC throttles bursts of eth_getLogs
+        return []
 
 
 class Sender:
@@ -622,8 +638,8 @@ class Keeper:
     def claim_outbox(self, tid: int, st: dict) -> bool:
         """Execute both L2->L1 messages of the dispatch tx on the HyperEVM Outbox."""
         head = self.ely.block_number()
-        logs = self.ely.logs(self.settlement, [topic(DISPATCHED_SIG), "0x" + tid.to_bytes(32, "big").hex()],
-                             int(self.dep.get("deployedAtBlock", 0)), head, 5000)
+        logs = self.ely.logs_latest(self.settlement, [topic(DISPATCHED_SIG), "0x" + tid.to_bytes(32, "big").hex()],
+                                    int(self.dep.get("deployedAtBlock", 0)), head, 50_000)
         if not logs:
             log("    no Dispatched log yet")
             return False
@@ -631,7 +647,7 @@ class Keeper:
         msgs = [l for l in rc["logs"] if l["address"].lower() == ARB_SYS.lower() and l["topics"][0] == topic(L2TOL1_SIG)]
         # confirmed send count = sendCount of the Elysium block named by the latest SendRootUpdated
         hb = self.hev.block_number()
-        roots = self.hev.logs(OUTBOX, [topic(SEND_ROOT_SIG)], max(0, hb - 20_000), hb, 900)
+        roots = self.hev.logs_latest(OUTBOX, [topic(SEND_ROOT_SIG)], max(0, hb - 20_000), hb, 900)
         if not roots:
             log("    no confirmed assertion in the last 20k HyperEVM blocks yet")
             return False
@@ -642,8 +658,9 @@ class Keeper:
             caller = to_checksum_address("0x" + m["data"][26:66])
             dest = to_checksum_address("0x" + m["topics"][1][26:])
             position = int(m["topics"][3], 16)
-            arb_block, eth_block, ts, value, data = abi_decode(
-                ["uint256", "uint256", "uint256", "uint256", "bytes"], bytes.fromhex(m["data"][66:]))
+            # decode the whole non-indexed tuple: the `bytes` offset is relative to the start, caller included
+            _, arb_block, eth_block, ts, value, data = abi_decode(
+                ["address", "uint256", "uint256", "uint256", "uint256", "bytes"], bytes.fromhex(m["data"][2:]))
             done_key = f"outbox-{position}"
             if done_key in st["done"]:
                 continue
@@ -673,6 +690,13 @@ class Keeper:
 
         # 5. HYPE HyperEVM -> Core (everything except a gas reserve for steps 7/11)
         if self.step("hype_to_core", st):
+            # never move the raise to Core while the ticker is out of budget: it would sit there with nothing to buy
+            auction = self.core.info({"type": "spotDeployState", "user": self.keeper})["gasAuction"]
+            cur = auction.get("currentGas")
+            price = Decimal(cur) if cur is not None else Decimal(auction["endGas"])
+            if price > budget and self.execute:
+                log(f"    BLOCKED: ticker price {price} HYPE > tickerBudget {budget} HYPE; the HYPE stays on HyperEVM.")
+                return
             amount = int((hype_total - HYPE_GAS_RESERVE) * 10**18)
             self.hev_tx.send("HYPE -> Core (system address)", HYPE_SYSTEM_ADDRESS, "0x", amount)
             st["done"].append("hype_to_core")
