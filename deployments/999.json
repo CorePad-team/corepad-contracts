@@ -1,0 +1,17 @@
+{
+  "chainId": 999,
+  "network": "HyperEVM mainnet",
+  "mode": "broadcast",
+  "deployer": "0x0d2246121587C62f0e97a3E96f17f58824324310",
+  "Settlement": "0xe2F97bdf01141e3455E1B3FD7251c6508A56f295",
+  "CorePadFactory": "0xbF5cf84A08E24e417E1972baf382763198Ad0E05",
+  "CorePadMetadata": "0x75E11fc2fFE75B02193bD65FBD86a96ec3aeF592",
+  "graduationHype": "10000000000000000",
+  "tickerReserve": "1000000000000000",
+  "guardSeconds": 60,
+  "guardMaxPerAddress": "10000000000000000000000000",
+  "rescueDelay": 86400,
+  "bridgeFactory": "0x0000000000000000000000000000000000000000",
+  "adapter": "0x0d2246121587C62f0e97a3E96f17f58824324310",
+  "note": "No Elysium bridge on HyperEVM: bridgeFactory is zero and Settlement's adapter slot is the deployer, so dispatch is not wired here. Launch, curve, graduate, abort and the metadata registry are live. Not connected to the app (corepad.app stays on Elysium testnet)."
+}
