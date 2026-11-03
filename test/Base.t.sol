@@ -67,6 +67,12 @@ abstract contract Base is Test {
     }
 
     /// @dev Skip the guard, then buy until frozen with a large final buy.
+    /// @dev The crossing buy auto-graduates; this returns that ticket, or graduates a pool frozen without one.
+    function _grad(LaunchPool pool) internal returns (uint256) {
+        if (pool.graduated()) return pool.ticketId();
+        return pool.graduate();
+    }
+
     function _fillToGraduation(LaunchPool pool) internal {
         vm.warp(block.timestamp + GUARD_S);
         _buy(pool, bob, 0.4 ether);

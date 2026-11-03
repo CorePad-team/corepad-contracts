@@ -217,6 +217,12 @@ contract LaunchPool is ReentrancyGuardTransient {
     function graduate() external nonReentrant returns (uint256 id) {
         if (graduated) revert AlreadyGraduated();
         if (!frozen) revert NotFrozen();
+        id = _graduate();
+    }
+
+    /// @dev Moves the raise and the book tokens into a Settlement ticket. Called by the buy that reaches
+    ///      800 M (auto-graduation) or, as a fallback, by anyone through `graduate()`.
+    function _graduate() internal returns (uint256 id) {
         graduated = true;
 
         uint256 hype = address(this).balance; // realHype + any forced dust
@@ -335,6 +341,11 @@ contract LaunchPool is ReentrancyGuardTransient {
         if (tokensSold == SALE_SUPPLY) {
             frozen = true;
             emit Frozen(address(this), realHype, listPrice());
+            // Auto-graduation: the buy that sells the last token opens the ticket in the same transaction.
+            // Only when Settlement can take it (factory wired, no ticket open for this launch); otherwise
+            // the pool stays frozen and anyone can call graduate() once it can. Checked before moving
+            // anything, because openTicket expects the tokens to have arrived first.
+            if (_settlementReady()) _graduate();
         }
     }
 
@@ -374,6 +385,14 @@ contract LaunchPool is ReentrancyGuardTransient {
     /// @dev Smallest-ish gross such that gross - floor(gross / 100) >= net.
     function _grossForNet(uint256 net) internal pure returns (uint256) {
         return (net * BPS + (BPS - FEE_BPS) - 1) / (BPS - FEE_BPS);
+    }
+
+    /// @dev True when Settlement will accept this pool's ticket now. Read-only, never reverts.
+    function _settlementReady() internal view returns (bool) {
+        (bool okF, bytes memory f) = settlement.staticcall(abi.encodeWithSignature("factory()"));
+        if (!okF || f.length < 32 || abi.decode(f, (address)) == address(0)) return false;
+        (bool okT, bytes memory t) = settlement.staticcall(abi.encodeWithSignature("ticketOfLaunch(uint256)", launchId));
+        return okT && t.length >= 32 && abi.decode(t, (uint256)) == 0;
     }
 
     function _useTransientReentrancyGuardOnlyOnMainnet() internal pure override returns (bool) {

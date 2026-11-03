@@ -47,6 +47,8 @@ docs in **English**.
    `guardMaxPerAddress` (default 1 % of supply) cumulative, counted both per `msg.sender` and per `tx.origin`
    (one transaction fanning out through fresh contracts is capped too). (A per-call cap is no cap.)
 3. **Graduation (Elysium).** When 800 M are sold, the pool freezes (`frozen`; no buy, no sell) and anyone can call
+   Auto-graduation: the buy that sells the last of the 800 M runs graduation in the same transaction
+   (when Settlement can take the ticket; otherwise the pool stays frozen and `graduate()` is the fallback).
    `graduate()`: HYPE raised + 200 M book tokens + any dust go to `Settlement`, which opens a
    `Ticket{launch, token, hype, tokens, tickerBudget, listPrice, createdAt, state}`.
    `listPrice` = the curve's final marginal price, so the book opens where the curve closed.

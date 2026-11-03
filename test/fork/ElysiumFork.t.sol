@@ -150,7 +150,8 @@ contract ElysiumForkTest is Test {
         vm.prank(trader);
         pool.buy{value: 5 ether}(0, block.timestamp); // clipped
         assertTrue(pool.frozen());
-        uint256 id = pool.graduate();
+        assertTrue(pool.graduated(), "the crossing buy auto-graduates");
+        uint256 id = pool.ticketId();
         Settlement.Ticket memory t = settlement.getTicket(id);
 
         // dispatch before the mirror is registered: reverts, ticket stays open

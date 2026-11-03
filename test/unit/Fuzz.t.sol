@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Base} from "../Base.t.sol";
+import {Settlement} from "../../src/Settlement.sol";
 import {LaunchPool} from "../../src/LaunchPool.sol";
 import {CorePadToken} from "../../src/CorePadToken.sol";
 
@@ -22,8 +23,14 @@ contract FuzzTest is Base {
         _buy(pool, bob, value);
         uint256 spent = b0 - bob.balance;
         assertEq(treasury.balance - t0, spent / 100, "fee == floor(1 % of gross)");
-        assertEq(address(pool).balance, spent - spent / 100);
-        assertEq(address(pool).balance, pool.realHype());
+        if (pool.graduated()) {
+            // a buy large enough to cross auto-graduates: the net HYPE is in the ticket, not the pool
+            assertEq(settlement.getTicket(pool.ticketId()).hype, spent - spent / 100);
+            assertEq(address(pool).balance, 0);
+        } else {
+            assertEq(address(pool).balance, spent - spent / 100);
+            assertEq(address(pool).balance, pool.realHype());
+        }
     }
 
     function testFuzz_sellFeeExactlyOnePercent(uint256 value, uint256 frac) public {
@@ -79,9 +86,11 @@ contract FuzzTest is Base {
         _buy(pool, bob, need + extra);
         assertEq(b0 - bob.balance, need, "refund == excess");
         assertTrue(pool.frozen());
-        assertEq(token.balanceOf(address(pool)), 200_000_000e18);
-        assertGe(pool.realHype(), G);
-        assertLe(pool.realHype(), G + 50);
+        assertTrue(pool.graduated());
+        Settlement.Ticket memory t = settlement.getTicket(pool.ticketId());
+        assertEq(t.tokens, 200_000_000e18);
+        assertGe(t.hype, G);
+        assertLe(t.hype, G + 50);
     }
 
     function testFuzz_graduationRaisesTarget(uint256[8] memory buys, uint256[8] memory sells) public {
@@ -100,8 +109,10 @@ contract FuzzTest is Base {
             }
         }
         if (!pool.frozen()) _buy(pool, carol, 100 ether);
-        assertGe(pool.realHype(), G, "raised >= graduationHype");
-        assertLe(pool.realHype(), G + 200, "raised <= graduationHype + rounding");
-        assertEq(address(pool).balance, pool.realHype());
+        assertTrue(pool.graduated(), "the crossing buy auto-graduates");
+        uint256 raised = settlement.getTicket(pool.ticketId()).hype;
+        assertGe(raised, G, "raised >= graduationHype");
+        assertLe(raised, G + 200, "raised <= graduationHype + rounding");
+        assertEq(address(pool).balance, 0);
     }
 }

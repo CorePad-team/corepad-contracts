@@ -104,6 +104,7 @@ contract Handler is Test {
         // testnet curve) so cumulative buys actually straddle the cap.
         value = pool.guardActive() ? bound(value, 1, 0.003 ether) : bound(value, 1, 0.8 ether);
         bool wasFrozen = pool.frozen() || pool.graduated();
+        bool wasGraduated = pool.graduated();
         uint256 x0 = pool.virtualHype();
         uint256 y0 = pool.virtualToken();
         uint256 t0 = treasury.balance;
@@ -113,6 +114,8 @@ contract Handler is Test {
         try pool.buy{value: value}(0, block.timestamp) returns (uint256 out) {
             if (wasFrozen) tradedAfterFreeze = true;
             buys++;
+            // the crossing buy auto-graduates: account for it exactly as a manual graduate()
+            if (!wasGraduated && pool.graduated()) _recordGraduation(settlement.getTicket(pool.ticketId()).hype - poolHypeDust);
             uint256 spent = b0 - a.balance;
             uint256 fee = treasury.balance - t0;
             ghostFees += fee;
@@ -194,6 +197,8 @@ contract Handler is Test {
         uint256 y0 = pool.virtualToken();
         vm.prank(a, a);
         pool.buy{value: need + bound(extra, 0, 5 ether)}(0, block.timestamp);
+        // this crossing buy auto-graduates: the same bookkeeping as a manual graduate()
+        if (pool.graduated()) _recordGraduation(settlement.getTicket(pool.ticketId()).hype - poolHypeDust);
         buys++;
         uint256 spent = b0 - a.balance;
         if (spent != need) feeMismatch = true;
@@ -217,6 +222,10 @@ contract Handler is Test {
         if (!pool.frozen() || pool.graduated()) return;
         uint256 raised = pool.realHype();
         pool.graduate();
+        _recordGraduation(raised);
+    }
+
+    function _recordGraduation(uint256 raised) internal {
         graduations++;
         graduatedRaise = raised;
         if (raised < pool.graduationHype() || raised > pool.graduationHype() + 1000) graduationOutOfRange = true;

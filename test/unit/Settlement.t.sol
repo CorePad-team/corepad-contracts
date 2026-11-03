@@ -22,9 +22,9 @@ contract SettlementTest is Base {
     function setUp() public override {
         super.setUp();
         (pool, token) = _launch();
-        _fillToGraduation(pool);
-        raised = pool.realHype();
-        pool.graduate();
+        _fillToGraduation(pool); // the crossing buy auto-graduates into ticket 1
+        _grad(pool);
+        raised = settlement.getTicket(1).hype;
     }
 
     function test_openTicket_onlyPool() public {

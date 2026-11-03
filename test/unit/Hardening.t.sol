@@ -44,8 +44,8 @@ contract HardeningTest is Base {
         _fillToGraduation(pool);
         uint256 x = pool.virtualHype();
         uint256 y = pool.virtualToken();
-        uint256 raised = pool.realHype();
-        uint256 id1 = pool.graduate();
+        uint256 id1 = _grad(pool); // opened by the crossing buy (auto-graduation)
+        uint256 raised = settlement.getTicket(id1).hype;
         assertEq(id1, 1);
 
         vm.warp(block.timestamp + RESCUE_DELAY);
@@ -89,11 +89,11 @@ contract HardeningTest is Base {
 
         // it can graduate again later, with a new ticket
         _buy(pool, bob, 0.5 ether);
-        _buy(pool, carol, 10 ether); // crossing buy, clipped
+        _buy(pool, carol, 10 ether); // crossing buy, clipped, auto-graduates again
         assertTrue(pool.frozen());
-        assertGe(pool.realHype(), G);
-        uint256 id2 = pool.graduate();
+        uint256 id2 = _grad(pool);
         assertEq(id2, 2);
+        assertGe(settlement.getTicket(id2).hype, G);
         assertEq(settlement.ticketOfLaunch(1), 2);
         assertEq(uint8(settlement.stateOf(2)), uint8(Settlement.State.Open));
         bridge.register(address(token));
@@ -106,7 +106,7 @@ contract HardeningTest is Base {
     function test_abort_partialSellThenCrossingBuyRefreezes() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         _fillToGraduation(pool);
-        uint256 id = pool.graduate();
+        uint256 id = _grad(pool);
         vm.warp(block.timestamp + RESCUE_DELAY);
         settlement.abort(id);
 
@@ -122,16 +122,18 @@ contract HardeningTest is Base {
         _buy(pool, alice, need + 1 ether);
         assertEq(b0 - alice.balance, need, "clip still charges exactly hypeToGraduate");
         assertTrue(pool.frozen());
-        assertEq(pool.graduate(), 2);
+        assertEq(_grad(pool), 2);
     }
 
     function test_abort_withDust_poolKeepsSurplusSeparately() public {
         (LaunchPool pool, CorePadToken token) = _launch();
-        _fillToGraduation(pool);
+        vm.warp(block.timestamp + GUARD_S);
+        _buy(pool, bob, 0.4 ether);
         vm.deal(address(pool), address(pool).balance + 7); // forced dust before graduation
         vm.prank(bob);
         token.transfer(address(pool), 5e18);
-        uint256 id = pool.graduate();
+        _buy(pool, carol, 10 ether); // crossing buy: auto-graduates and carries the dust into the ticket
+        uint256 id = _grad(pool);
         assertEq(settlement.getTicket(id).hype, pool.virtualHype() - pool.virtualHype0() + 7);
         vm.warp(block.timestamp + RESCUE_DELAY);
         settlement.abort(id);
@@ -164,7 +166,7 @@ contract HardeningTest is Base {
     function test_symbols_takenSurvivesAbort() public {
         (LaunchPool pool,) = _launch();
         _fillToGraduation(pool);
-        uint256 id = pool.graduate();
+        uint256 id = _grad(pool);
         vm.warp(block.timestamp + RESCUE_DELAY);
         settlement.abort(id);
         vm.expectRevert(abi.encodeWithSelector(CorePadFactory.SymbolTaken.selector, 1));
@@ -220,7 +222,7 @@ contract HardeningTest is Base {
         vm.expectRevert(LaunchPool.NotGraduated.selector);
         pool.sweep(address(0));
         _fillToGraduation(pool);
-        pool.graduate();
+        _grad(pool);
         vm.deal(address(pool), 3);
         vm.prank(bob);
         token.transfer(address(pool), 9e18);
@@ -234,7 +236,7 @@ contract HardeningTest is Base {
     function test_sweep_settlementNeverBelowLocked() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         _fillToGraduation(pool);
-        pool.graduate();
+        _grad(pool);
         assertEq(settlement.sweep(address(0)), 0);
         assertEq(settlement.sweep(address(token)), 0);
         assertEq(address(settlement).balance, settlement.lockedHype());

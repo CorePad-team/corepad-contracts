@@ -78,8 +78,8 @@ contract AuditPoC is Base {
     function test_regression_M2_abortReturnsRaiseToHoldersNotTreasury() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         _fillToGraduation(pool);
-        uint256 raised = pool.realHype();
-        uint256 id = pool.graduate();
+        uint256 id = _grad(pool); // opened by the crossing buy
+        uint256 raised = settlement.getTicket(id).hype;
 
         vm.warp(block.timestamp + RESCUE_DELAY);
         uint256 before = treasury.balance;
@@ -122,7 +122,7 @@ contract AuditPoC is Base {
         (,, address p) = f2.launch("Core Test", "CORE", 0);
         LaunchPool pool = LaunchPool(payable(p));
         _fillToGraduation(pool);
-        pool.graduate();
+        _grad(pool);
         assertEq(address(pool).balance, 0);
     }
 
@@ -150,7 +150,7 @@ contract AuditPoC is Base {
     function test_regression_L2_surplusSweptAccountedUntouched() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         _fillToGraduation(pool);
-        uint256 id = pool.graduate();
+        uint256 id = _grad(pool);
         uint256 locked = settlement.lockedHype();
         new ForceSend{value: 1 ether}(address(settlement));
         vm.prank(bob);
@@ -199,7 +199,7 @@ contract AuditPoC is Base {
     function test_info_I2_keeperConfirmsArbitraryIndexes() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         _fillToGraduation(pool);
-        uint256 id = pool.graduate();
+        uint256 id = _grad(pool);
         bridge.register(address(token));
         settlement.dispatch(id);
         vm.prank(keeper);

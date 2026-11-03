@@ -225,8 +225,11 @@ contract LaunchPoolTest is Base {
         assertEq(before - bob.balance, need, "charged exactly hypeToGraduate");
         assertEq(qRefund, 3 ether);
         assertEq(pool.tokensSold(), 800_000_000e18);
-        assertEq(token.balanceOf(address(pool)), 200_000_000e18);
+        // the crossing buy auto-graduated: the 200 M book tokens are already in the ticket
         assertTrue(pool.frozen());
+        assertTrue(pool.graduated());
+        assertEq(token.balanceOf(address(pool)), 0);
+        assertEq(settlement.getTicket(pool.ticketId()).tokens, 200_000_000e18);
     }
 
     function test_freeze_blocksBuyAndSell() public {
@@ -246,22 +249,21 @@ contract LaunchPoolTest is Base {
         (LaunchPool pool, CorePadToken token) = _launch();
         vm.expectRevert(LaunchPool.NotFrozen.selector);
         pool.graduate();
+        // auto-graduation: the buy that sells the last token opens the ticket in the same transaction
         _fillToGraduation(pool);
-        uint256 raised = pool.realHype();
+        assertTrue(pool.graduated());
+        assertEq(pool.ticketId(), 1);
+        Settlement.Ticket memory t = settlement.getTicket(1);
+        uint256 raised = t.hype;
         assertGe(raised, G);
         assertLe(raised, G + 100, "graduationHype +- rounding");
         uint256 price = pool.listPrice();
         // closing marginal price = (G * 1073 / 800) / 273 M
         assertApproxEqRel(price, G * 1073 * 1e18 / 800 / 273_000_000e18, 1e9);
-
-        vm.prank(carol);
-        uint256 id = pool.graduate();
-        assertEq(id, 1);
         assertEq(address(pool).balance, 0);
+        assertEq(pool.realHype(), 0);
         assertEq(token.balanceOf(address(pool)), 0);
         assertEq(address(settlement).balance, raised);
-        Settlement.Ticket memory t = settlement.getTicket(1);
-        assertEq(t.hype, raised);
         assertEq(t.tokens, 200_000_000e18);
         assertEq(t.tickerBudget, TICKER);
         assertEq(t.listPrice, price);
@@ -272,15 +274,34 @@ contract LaunchPoolTest is Base {
         pool.graduate();
     }
 
+    function test_autoGraduate_fallsBackToManualWhenSettlementNotWired() public {
+        // a Settlement whose factory is not set yet cannot take a ticket: the crossing buy must still
+        // succeed, the pool stays frozen, and graduate() works once Settlement is wired
+        Settlement s2 = new Settlement(owner, treasury, keeper, address(adapter), RESCUE_DELAY);
+        CorePadFactory f2 = new CorePadFactory(address(s2), treasury, address(bridge), G, TICKER, GUARD_S, GUARD_MAX);
+        vm.prank(alice);
+        (, address t, address p) = f2.launch("Fallback", "FALL", 0);
+        LaunchPool pool = LaunchPool(payable(p));
+        _fillToGraduation(pool);
+        assertTrue(pool.frozen());
+        assertFalse(pool.graduated());
+        assertEq(CorePadToken(t).balanceOf(address(pool)), 200_000_000e18);
+        vm.prank(owner);
+        s2.setFactory(address(f2));
+        vm.prank(carol);
+        uint256 id = pool.graduate();
+        assertEq(id, 1);
+        assertEq(s2.getTicket(1).tokens, 200_000_000e18);
+    }
+
     function test_graduate_sweepsDust() public {
         (LaunchPool pool, CorePadToken token) = _launch();
         vm.warp(block.timestamp + GUARD_S);
         _buy(pool, bob, 0.2 ether);
         vm.prank(bob);
         token.transfer(address(pool), 5e18); // dust
-        _buy(pool, carol, 10 ether);
-        vm.deal(address(pool), address(pool).balance + 7); // forced ETH
-        pool.graduate();
+        vm.deal(address(pool), address(pool).balance + 7); // forced ETH, before the crossing buy
+        _buy(pool, carol, 10 ether); // crosses and auto-graduates: the dust goes into the ticket
         Settlement.Ticket memory t = settlement.getTicket(1);
         assertEq(t.tokens, 200_000_000e18 + 5e18);
         assertEq(address(settlement).balance, t.hype);
